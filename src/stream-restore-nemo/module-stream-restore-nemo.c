@@ -1714,7 +1714,11 @@ static void trigger_save(struct userdata *u) {
     for (c = pa_idxset_first(u->subscribed, &idx); c; c = pa_idxset_next(u->subscribed, &idx)) {
         pa_tagstruct *t;
 
+#if (PULSEAUDIO_VERSION >= 7)
+        t = pa_tagstruct_new();
+#else
         t = pa_tagstruct_new(NULL, 0);
+#endif
         pa_tagstruct_putu32(t, PA_COMMAND_EXTENSION);
         pa_tagstruct_putu32(t, 0);
         pa_tagstruct_putu32(t, u->module->index);
@@ -2661,7 +2665,11 @@ static int extension_cb(pa_native_protocol *p, pa_module *m, pa_native_connectio
     if (pa_tagstruct_getu32(t, &command) < 0)
         goto fail;
 
+#if (PULSEAUDIO_VERSION >= 7)
+    reply = pa_tagstruct_new();
+#else
     reply = pa_tagstruct_new(NULL, 0);
+#endif
     pa_tagstruct_putu32(reply, PA_COMMAND_REPLY);
     pa_tagstruct_putu32(reply, tag);
 

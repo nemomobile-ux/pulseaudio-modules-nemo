@@ -673,7 +673,11 @@ static void setup_notifier(struct mv_userdata *u, const char *conf_file) {
 
     conf = conf_file ? conf_file : DEFAULT_LISTENING_NOTIFIER_CONF_FILE;
     pa_log_debug("Read long listening time notifier config from %s", conf);
+#if (PULSEAUDIO_VERSION >= 8)
+    pa_config_parse(conf, NULL, items, NULL, false, NULL);
+#else
     pa_config_parse(conf, NULL, items, NULL, NULL);
+#endif
 
     if (pa_hashmap_isempty(role_list) || pa_hashmap_isempty(mode_list) || timeout == 0) {
         /* No valid configuration parsed, free and return */
