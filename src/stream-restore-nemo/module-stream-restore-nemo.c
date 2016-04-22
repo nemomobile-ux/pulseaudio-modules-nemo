@@ -31,19 +31,17 @@
 #include <sys/types.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <ctype.h>
 
+#include <pulse/gccmacro.h>
 #include <pulse/xmalloc.h>
 #include <pulse/volume.h>
 #include <pulse/timeval.h>
-#include <pulse/util.h>
 #include <pulse/rtclock.h>
 
 #include <pulsecore/core-error.h>
 #include <pulsecore/module.h>
 #include <pulsecore/core-util.h>
 #include <pulsecore/modargs.h>
-#include <pulsecore/macro.h>
 #include <pulsecore/log.h>
 #include <pulsecore/core-subscribe.h>
 #include <pulsecore/sink-input.h>
@@ -53,8 +51,13 @@
 #include <pulsecore/pstream.h>
 #include <pulsecore/pstream-util.h>
 #include <pulsecore/database.h>
+#include <pulsecore/tagstruct.h>
+#include <pulsecore/proplist-util.h>
+
+#ifdef HAVE_DBUS
 #include <pulsecore/dbus-util.h>
 #include <pulsecore/protocol-dbus.h>
+#endif
 
 #include "module-stream-restore-nemo-symdef.h"
 #include "volume-proxy.h"
@@ -81,37 +84,23 @@ PA_MODULE_USAGE(
 #define DEFAULT_FALLBACK_FILE PA_DEFAULT_CONFIG_DIR"/stream-restore.table"
 #define DEFAULT_FALLBACK_FILE_USER "stream-restore.table"
 
-#define DEFAULT_ROUTE_FILE PA_DEFAULT_CONFIG_DIR"/route-entry.table"
-#define DEFAULT_ROUTE_FILE_USER "route-entry.table"
-
-/* sink-volume table syntax:
- * <audio mode>:<sink to control>
- * for example:
- * btmono:sink.hw1
- */
-#define DEFAULT_SINK_VOLUME_FILE PA_DEFAULT_CONFIG_DIR"/sink-volume.table"
-#define DEFAULT_SINK_VOLUME_FILE_USER "sink-volume.table"
-
 #define WHITESPACE "\n\r \t"
-
-#define PA_NOKIA_PROP_AUDIO_MODE "x-maemo.mode"
-#define VOICE_MASTER_SINK_INPUT_NAME "Voice module master sink input"
 
 static const char* const valid_modargs[] = {
     "restore_device",
     "restore_volume",
     "restore_muted",
-    "restore_route_volume",
     "on_hotplug",
     "on_rescue",
     "fallback_table",
+    "restore_route_volume",
     "route_table",
     "sink_volume_table",
     "use_voice",
     NULL
 };
 
-struct route_volume {
+struct ext_route_volume {
     char *name;
     pa_cvolume volume;
     pa_cvolume min_volume;
@@ -120,17 +109,17 @@ struct route_volume {
 
     /* when "slave" route volume enabled stream is changed, master is set to
      * same volume, and when setting master, also slaves are updated. */
-    struct route_volume *master;
+    struct ext_route_volume *master;
 
-    PA_LLIST_FIELDS(struct route_volume);
+    PA_LLIST_FIELDS(struct ext_route_volume);
 };
 
-struct sink_volume {
+struct ext_sink_volume {
     char *mode;
     char *sink_name;
     pa_sink *sink;
 
-    PA_LLIST_FIELDS(struct sink_volume);
+    PA_LLIST_FIELDS(struct ext_sink_volume);
 };
 
 struct userdata {
@@ -141,6 +130,7 @@ struct userdata {
         *sink_input_new_hook_slot,
         *sink_input_fixate_hook_slot,
         *source_output_new_hook_slot,
+        *source_output_fixate_hook_slot,
         *sink_put_hook_slot,
         *source_put_hook_slot,
         *sink_unlink_hook_slot,
@@ -152,13 +142,20 @@ struct userdata {
     bool restore_device:1;
     bool restore_volume:1;
     bool restore_muted:1;
-    bool restore_route_volume:1;
     bool on_hotplug:1;
     bool on_rescue:1;
 
     pa_native_protocol *protocol;
     pa_idxset *subscribed;
 
+#ifdef HAVE_DBUS
+    pa_dbus_protocol *dbus_protocol;
+    pa_hashmap *dbus_entries;
+    uint32_t next_index; /* For generating object paths for entries. */
+#endif
+
+    /* extension */
+    bool restore_route_volume;
     bool use_voice;
     pa_hook_slot *sink_proplist_changed_slot;
     pa_hook_slot *sink_input_move_finished_slot;
@@ -168,31 +165,29 @@ struct userdata {
     pa_volume_proxy *volume_proxy;
     pa_hook_slot *volume_proxy_hook_slot;
 
-    pa_dbus_protocol *dbus_protocol;
-    pa_hashmap *dbus_entries;
-    uint32_t next_index; /* For generating object paths for entries. */
-
-    PA_LLIST_HEAD(struct route_volume, route_volumes);
+    PA_LLIST_HEAD(struct ext_route_volume, route_volumes);
 
     /* sink volumes */
     pa_subscription *sink_subscription;
-    struct sink_volume *use_sink_volume;
-    PA_LLIST_HEAD(struct sink_volume, sink_volumes);
+    struct ext_sink_volume *use_sink_volume;
+    PA_LLIST_HEAD(struct ext_sink_volume, sink_volumes);
 };
 
 #define ENTRY_VERSION 4
+
 struct entry {
     uint8_t version;
-    bool muted_valid:1, volume_valid:1, device_valid:1, card_valid:1;
-    bool muted:1;
+    bool muted_valid, volume_valid, device_valid, card_valid;
+    bool muted;
     pa_channel_map channel_map;
     pa_cvolume volume;
-    char device[PA_NAME_MAX];
-    char card[PA_NAME_MAX];
+    char *device;
+    char *card;
 };
 
-#define ROUTE_ENTRY_VERSION 4
-struct route_entry {
+#define EXT_ROUTE_ENTRY_VERSION 4
+
+struct ext_route_entry {
     uint8_t version;
     pa_cvolume volume;
 };
@@ -206,230 +201,62 @@ enum {
     SUBCOMMAND_EVENT
 };
 
-static struct entry *read_entry(struct userdata *u, const char *name);
-static bool entries_equal(const struct entry *a, const struct entry *b);
-static void apply_entry(struct userdata *u, const char *name, struct entry *e);
+static struct entry* entry_new(void);
+static void entry_free(struct entry *e);
+static struct entry *entry_read(struct userdata *u, const char *name);
+static bool entry_write(struct userdata *u, const char *name, const struct entry *e, bool replace);
+static struct entry* entry_copy(const struct entry *e);
+static void entry_apply(struct userdata *u, const char *name, struct entry *e);
 static void trigger_save(struct userdata *u);
-static char *get_name(pa_proplist *p, const char *prefix);
-static void sink_volume_subscribe_cb(pa_core *c, pa_subscription_event_type_t t, uint32_t idx, void *userdata);
+
+
+/* route extension defines */
+#define DEFAULT_ROUTE_FILE PA_DEFAULT_CONFIG_DIR"/route-entry.table"
+#define DEFAULT_ROUTE_FILE_USER "route-entry.table"
+
+/* sink-volume table syntax:
+ * <audio mode>:<sink to control>
+ * for example:
+ * btmono:sink.hw1
+ */
+#define DEFAULT_SINK_VOLUME_FILE PA_DEFAULT_CONFIG_DIR"/sink-volume.table"
+#define DEFAULT_SINK_VOLUME_FILE_USER "sink-volume.table"
+
+#define PA_NOKIA_PROP_AUDIO_MODE "x-maemo.mode"
+#define VOICE_MASTER_SINK_INPUT_NAME "Voice module master sink input"
+
 static void subscribe_callback(pa_core *c, pa_subscription_event_type_t t, uint32_t idx, void *userdata);
-static void _apply_route_volumes(struct userdata *u, bool apply);
-static void free_dbus_entry_cb(void *p);
+static bool entries_equal(const struct entry *a, const struct entry *b);
+/* route extension functions */
+static void ext_sink_set_volume(pa_sink *s, const pa_cvolume *vol);
+static struct ext_sink_volume* ext_have_sink_volume(struct userdata *u, const char *mode);
+static void ext_free_sink_volumes(struct userdata *u);
+static struct ext_route_volume* ext_get_route_volume_by_name(struct userdata *u, const char *name);
+static void ext_set_route_volume(struct ext_route_volume *r, const pa_cvolume *volume);
+static void ext_set_route_volume_by_name(struct userdata *u, const char *name, const pa_cvolume *volume);
+static void ext_set_route_volumes(struct userdata *u, const pa_cvolume *volume);
+static void ext_set_stream(struct userdata *u, const char *name, const pa_volume_t volume, const int muted);
+static void ext_set_streams(struct userdata *u, const pa_volume_t volume, const int muted);
+static void ext_proxy_volume(struct userdata *u, const char*name, const pa_cvolume *volume);
+static void ext_proxy_volume_all(struct userdata *u);
+static pa_hook_result_t ext_volume_proxy_cb(pa_volume_proxy *p, const char *name, struct userdata *u);
+static char* ext_route_key(const char *name, const char *route);
+static void ext_free_route_volumes(struct userdata *u);
+static struct ext_route_entry* ext_read_route_entry(struct userdata *u, const char *name, const char *route);
+static bool ext_entry_has_volume_changed(struct entry *a, struct entry *b);
+static void ext_apply_route_volumes(struct userdata *u, bool apply);
+static void ext_update_volumes(struct userdata *u);
+static void ext_check_mode(const char *mode, struct userdata *u);
+static void ext_check_sink_mode(pa_sink *s, struct userdata *u);
+static pa_hook_result_t ext_sink_proplist_changed_hook_callback(pa_core *c, pa_sink *s, struct userdata *u);
+static pa_hook_result_t ext_hw_sink_input_move_finish_callback(pa_core *c, pa_sink_input *i, struct userdata *u);
+static pa_hook_result_t ext_parameters_changed_cb(pa_core *c, meego_parameter_update_args *ua, struct userdata *u);
+static void ext_sink_volume_subscribe_cb(pa_core *c, pa_subscription_event_type_t t, uint32_t idx, void *userdata);
+static int ext_fill_route_db(struct userdata *u, const char *filename);
+static int ext_fill_sink_db(struct userdata *u, const char *filename);
+/* route extension functions end */
 
-static void _sink_set_volume(pa_sink *s, const pa_cvolume *vol) {
-    pa_channel_map c;
-    pa_cvolume remapped;
-
-    pa_assert(s);
-    pa_assert(vol);
-    pa_assert(vol->channels == 1 || vol->channels == 2);
-
-    if (vol->channels == 1)
-        pa_channel_map_init_mono(&c);
-    else
-        pa_channel_map_init_stereo(&c);
-
-    remapped = *vol;
-    pa_sink_set_volume(s,
-                       pa_cvolume_remap(&remapped, &c, &s->channel_map),
-                       false,
-                       false);
-}
-
-static struct sink_volume* have_sink_volume(struct userdata *u, const char *mode) {
-    struct sink_volume *v = NULL;
-
-    pa_assert(u);
-    pa_assert(mode);
-
-    for (v = u->sink_volumes; v; v = v->next) {
-        if (pa_streq(mode, v->mode)) {
-            if (!v->sink)
-                v->sink = pa_namereg_get(u->core, v->sink_name, PA_NAMEREG_SINK);
-
-            if (v->sink)
-                return v;
-            else
-                return NULL;
-        }
-    }
-
-    return NULL;
-}
-
-static void _free_sink_volumes(struct userdata *u) {
-    struct sink_volume *v;
-
-    pa_assert(u);
-
-    while ((v = u->sink_volumes)) {
-        PA_LLIST_REMOVE(struct sink_volume, u->sink_volumes, v);
-        pa_xfree(v->mode);
-        pa_xfree(v->sink_name);
-        pa_xfree(v);
-    }
-}
-
-/* return struct route_volume* when entry with given
- * name exists, otherwise return NULL */
-static struct route_volume* get_route_volume_by_name(struct userdata *u, const char *name) {
-    struct route_volume *ret = NULL;
-    struct route_volume *r;
-
-    PA_LLIST_FOREACH(r, u->route_volumes) {
-        if (pa_streq(name, r->name)) {
-            ret = r;
-            break;
-        }
-    }
-
-    return ret;
-}
-
-static void set_route_volume(struct route_volume *r, const pa_cvolume *volume) {
-    pa_assert(r);
-    pa_assert(pa_cvolume_valid(volume));
-
-    r->volume = *volume;
-}
-
-static void set_route_volume_by_name(struct userdata *u, const char *name, const pa_cvolume *volume) {
-    struct route_volume *r;
-
-    pa_assert(u);
-    pa_assert(name);
-    pa_assert(pa_cvolume_valid(volume));
-
-    if (!u->route)
-        return;
-
-    if ((r = get_route_volume_by_name(u, name)))
-        set_route_volume(r, volume);
-}
-
-static void set_route_volumes(struct userdata *u, const pa_cvolume *volume) {
-    struct route_volume *r;
-
-    pa_assert(u);
-    pa_assert(volume);
-    pa_assert(pa_cvolume_valid(volume));
-
-    PA_LLIST_FOREACH(r, u->route_volumes)
-        set_route_volume(r, volume);
-}
-
-static void _set_stream(struct userdata *u, const char *name, const pa_volume_t volume, const int muted) {
-    pa_sink_input *si;
-    uint32_t idx;
-    pa_channel_map from;
-    pa_cvolume vol;
-
-    pa_assert(u);
-    pa_assert(name);
-
-    pa_cvolume_init(&vol);
-    pa_channel_map_init_mono(&from);
-
-    for (si = pa_idxset_first(u->core->sink_inputs, &idx); si; si = pa_idxset_next(u->core->sink_inputs, &idx)) {
-        char *n;
-
-        if (!si->sink) /* for eg. moving */
-            continue;
-
-        if (!(n = get_name(si->proplist, "sink-input")))
-            continue;
-
-        if (!pa_streq(name, n)) {
-            pa_xfree(n);
-            continue;
-        }
-        pa_xfree(n);
-
-        if (si->volume_writable) {
-            pa_log_info("Restoring volume for sink input %s. c %d vol %d", name, from.channels, volume);
-            pa_cvolume_set(&vol, 1, volume);
-            pa_sink_input_set_volume(si, pa_cvolume_remap(&vol, &from, &si->channel_map), true, true);
-        }
-
-        if (muted > 0) {
-            pa_log_info("Restoring mute state for sink input %s.", name);
-            pa_sink_input_set_mute(si, !!muted, true);
-        }
-
-    }
-}
-
-static void _set_streams(struct userdata *u, const pa_volume_t volume, const int muted) {
-    struct route_volume *r;
-
-    pa_assert(u);
-
-    for (r = u->route_volumes; r; r = r->next) {
-        _set_stream(u, r->name, volume, muted);
-    }
-}
-
-static void _proxy_volume(struct userdata *u, const char*name, const pa_cvolume *volume) {
-    pa_assert(u);
-    pa_assert(u->volume_proxy);
-    pa_assert(name);
-    pa_assert(volume);
-    pa_assert(pa_cvolume_valid(volume));
-
-    pa_volume_proxy_set_volume(u->volume_proxy, name, pa_cvolume_max(volume));
-}
-
-static void proxy_volume_all(struct userdata *u) {
-    struct route_volume *r;
-
-    pa_assert(u);
-    pa_assert(u->volume_proxy);
-
-    /* proxy all route volumes */
-    PA_LLIST_FOREACH(r, u->route_volumes)
-        _proxy_volume(u, r->name, &r->volume);
-}
-
-static pa_hook_result_t volume_proxy_cb(pa_volume_proxy *p, const char *name, struct userdata *u) {
-    pa_volume_t vol;
-    pa_cvolume volume;
-    struct route_volume *r;
-    bool changed = false;
-
-    if (!pa_volume_proxy_get_volume(p, name, &vol))
-        return PA_HOOK_OK;
-
-    if ((r = get_route_volume_by_name(u, name))) {
-        int i;
-        for (i = 0; i < r->volume.channels; i++) {
-            if (vol != r->volume.values[i]) {
-                pa_cvolume_set(&r->volume, r->volume.channels, vol);
-                changed = true;
-                break;
-            }
-        }
-    }
-
-    if (changed) {
-        if (u->use_sink_volume) {
-            pa_log_debug("volume_proxy_cb() adjust sink-volume %u", vol);
-
-            pa_cvolume_init(&volume);
-            pa_cvolume_set(&volume, 1, vol);
-
-            /* set all route volumes to sink volume */
-            set_route_volumes(u, &volume);
-            _sink_set_volume(u->use_sink_volume->sink, &volume);
-            _apply_route_volumes(u, false);
-            /* trigger_save() is going to be called in sink_volume_subscribe_cb */
-        } else {
-            _apply_route_volumes(u, true);
-            trigger_save(u);
-        }
-    }
-
-    return PA_HOOK_OK;
-}
+#ifdef HAVE_DBUS
 
 #define OBJECT_PATH "/org/pulseaudio/stream_restore1"
 #define ENTRY_OBJECT_NAME "entry"
@@ -659,7 +486,7 @@ static int get_volume_arg(DBusConnection *conn, DBusMessage *msg, DBusMessageIte
         pa_assert_se(dbus_message_iter_next(&struct_iter));
         dbus_message_iter_get_basic(&struct_iter, &chan_vol);
 
-        if (chan_vol > PA_VOLUME_MAX) {
+        if (!PA_VOLUME_IS_VALID(chan_vol)) {
             pa_dbus_send_error(conn, msg, DBUS_ERROR_INVALID_ARGS, "Invalid volume: %u", chan_vol);
             return -1;
         }
@@ -880,10 +707,8 @@ static void handle_add_entry(DBusConnection *conn, DBusMessage *msg, void *userd
     const char *device = NULL;
     pa_channel_map map;
     pa_cvolume vol;
-    dbus_bool_t muted = false;
-    dbus_bool_t apply_immediately = false;
-    pa_datum key;
-    pa_datum value;
+    dbus_bool_t muted = FALSE;
+    dbus_bool_t apply_immediately = FALSE;
     struct dbus_entry *dbus_entry = NULL;
     struct entry *e = NULL;
 
@@ -916,23 +741,22 @@ static void handle_add_entry(DBusConnection *conn, DBusMessage *msg, void *userd
         bool volume_updated = false;
         bool device_updated = false;
 
-        pa_assert_se(e = read_entry(u, name));
+        pa_assert_se(e = entry_read(u, name));
         mute_updated = e->muted != muted;
         e->muted = muted;
         e->muted_valid = true;
 
-        volume_updated = (e->volume_valid != !!map.channels) ||
-                         (e->volume_valid && (!pa_cvolume_equal(&e->volume, &vol) ||
-                                              !pa_channel_map_equal(&e->channel_map, &map)));
+        volume_updated = (e->volume_valid != !!map.channels) || !pa_cvolume_equal(&e->volume, &vol);
         e->volume = vol;
         e->channel_map = map;
         e->volume_valid = !!map.channels;
 
         device_updated = (e->device_valid != !!device[0]) || !pa_streq(e->device, device);
-        pa_strlcpy(e->device, device, sizeof(e->device));
+        pa_xfree(e->device);
+        e->device = pa_xstrdup(device);
         e->device_valid = !!device[0];
 
-        set_route_volume_by_name(u, name, &e->volume);
+        ext_set_route_volume_by_name(u, name, &e->volume);
 
         if (mute_updated)
             send_mute_updated_signal(dbus_entry, e);
@@ -945,26 +769,19 @@ static void handle_add_entry(DBusConnection *conn, DBusMessage *msg, void *userd
         dbus_entry = dbus_entry_new(u, name);
         pa_assert_se(pa_hashmap_put(u->dbus_entries, dbus_entry->entry_name, dbus_entry) == 0);
 
-        e = pa_xnew0(struct entry, 1);
-        e->version = ENTRY_VERSION;
+        e = entry_new();
         e->muted_valid = true;
         e->volume_valid = !!map.channels;
         e->device_valid = !!device[0];
         e->muted = muted;
         e->volume = vol;
         e->channel_map = map;
-        pa_strlcpy(e->device, device, sizeof(e->device));
+        e->device = pa_xstrdup(device);
 
         send_new_entry_signal(dbus_entry);
     }
 
-    key.data = (char *) name;
-    key.size = strlen(name);
-
-    value.data = e;
-    value.size = sizeof(struct entry);
-
-    pa_assert_se(pa_database_set(u->database, &key, &value, true) == 0);
+    pa_assert_se(entry_write(u, name, e, true));
 
     /* FIXME: If the entry was not new, and its volume was updated, and there
      * is a route volume for the entry, and the new volume wasn't the same for
@@ -972,29 +789,29 @@ static void handle_add_entry(DBusConnection *conn, DBusMessage *msg, void *userd
      * apply_immediately is false here. That happens because when the new
      * volume is stored in the volume proxy, it is stored as a mono value only,
      * and when we get a callback from the proxy due to updating it,
-     * volume_proxy_cb thinks that the volume has been changed, even though it
+     * ext_volume_proxy_cb thinks that the volume has been changed, even though it
      * really isn't (information is lost in the mono transformation).
-     * volume_proxy_cb then applies the new mono volume from the volume proxy
+     * ext_volume_proxy_cb then applies the new mono volume from the volume proxy
      * immediately for existing streams also.
      *
      * If all channels have the same volume to begin with, this doesn't happen,
-     * because volume_proxy_cb correctly detects that nothing has changed and
+     * because ext_volume_proxy_cb correctly detects that nothing has changed and
      * nothing needs to be done.
      *
      * This can be fixed either by changing the volume proxy to store
      * multichannel volumes or by changing the route volumes to only store mono
      * volumes. */
     if (apply_immediately)
-        apply_entry(u, name, e);
+        entry_apply(u, name, e);
 
     trigger_save(u);
 
     if (e->volume_valid)
-        _proxy_volume(u, name, &e->volume);
+        ext_proxy_volume(u, name, &e->volume);
 
     pa_dbus_send_empty_reply(conn, msg);
 
-    pa_xfree(e);
+    entry_free(e);
 }
 
 static void handle_get_entry_by_name(DBusConnection *conn, DBusMessage *msg, void *userdata) {
@@ -1045,13 +862,13 @@ static void handle_entry_get_device(DBusConnection *conn, DBusMessage *msg, void
     pa_assert(msg);
     pa_assert(de);
 
-    pa_assert_se(e = read_entry(de->userdata, de->entry_name));
+    pa_assert_se(e = entry_read(de->userdata, de->entry_name));
 
     device = e->device_valid ? e->device : "";
 
     pa_dbus_send_basic_variant_reply(conn, msg, DBUS_TYPE_STRING, &device);
 
-    pa_xfree(e);
+    entry_free(e);
 }
 
 static void handle_entry_set_device(DBusConnection *conn, DBusMessage *msg, DBusMessageIter *iter, void *userdata) {
@@ -1067,31 +884,25 @@ static void handle_entry_set_device(DBusConnection *conn, DBusMessage *msg, DBus
 
     dbus_message_iter_get_basic(iter, &device);
 
-    pa_assert_se(e = read_entry(de->userdata, de->entry_name));
+    pa_assert_se(e = entry_read(de->userdata, de->entry_name));
 
     updated = (e->device_valid != !!device[0]) || !pa_streq(e->device, device);
 
     if (updated) {
-        pa_datum key;
-        pa_datum value;
-
-        pa_strlcpy(e->device, device, sizeof(e->device));
+        pa_xfree(e->device);
+        e->device = pa_xstrdup(device);
         e->device_valid = !!device[0];
 
-        key.data = de->entry_name;
-        key.size = strlen(de->entry_name);
-        value.data = e;
-        value.size = sizeof(struct entry);
-        pa_assert_se(pa_database_set(de->userdata->database, &key, &value, true) == 0);
+        pa_assert_se(entry_write(de->userdata, de->entry_name, e, true));
 
-        apply_entry(de->userdata, de->entry_name, e);
+        entry_apply(de->userdata, de->entry_name, e);
         send_device_updated_signal(de, e);
         trigger_save(de->userdata);
     }
 
     pa_dbus_send_empty_reply(conn, msg);
 
-    pa_xfree(e);
+    entry_free(e);
 }
 
 static void handle_entry_get_volume(DBusConnection *conn, DBusMessage *msg, void *userdata) {
@@ -1104,7 +915,7 @@ static void handle_entry_get_volume(DBusConnection *conn, DBusMessage *msg, void
     pa_assert(msg);
     pa_assert(de);
 
-    pa_assert_se(e = read_entry(de->userdata, de->entry_name));
+    pa_assert_se(e = entry_read(de->userdata, de->entry_name));
 
     pa_assert_se(reply = dbus_message_new_method_return(msg));
 
@@ -1113,7 +924,7 @@ static void handle_entry_get_volume(DBusConnection *conn, DBusMessage *msg, void
 
     pa_assert_se(dbus_connection_send(conn, reply, NULL));
 
-    pa_xfree(e);
+    entry_free(e);
 }
 
 static void handle_entry_set_volume(DBusConnection *conn, DBusMessage *msg, DBusMessageIter *iter, void *userdata) {
@@ -1121,7 +932,7 @@ static void handle_entry_set_volume(DBusConnection *conn, DBusMessage *msg, DBus
     pa_channel_map map;
     pa_cvolume vol;
     struct entry *e = NULL;
-    struct route_volume *r;
+    struct ext_route_volume *r;
     bool updated = false;
 
     pa_assert(conn);
@@ -1132,51 +943,42 @@ static void handle_entry_set_volume(DBusConnection *conn, DBusMessage *msg, DBus
     if (get_volume_arg(conn, msg, iter, &map, &vol) < 0)
         return;
 
-    pa_assert_se(e = read_entry(de->userdata, de->entry_name));
+    pa_assert_se(e = entry_read(de->userdata, de->entry_name));
 
-    updated = (e->volume_valid != !!map.channels) ||
-              (e->volume_valid && (!pa_cvolume_equal(&e->volume, &vol) ||
-                                   !pa_channel_map_equal(&e->channel_map, &map)));
+    updated = (e->volume_valid != !!map.channels) || !pa_cvolume_equal(&e->volume, &vol);
 
     if (updated) {
-        pa_datum key;
-        pa_datum value;
-
         e->volume = vol;
         e->channel_map = map;
         e->volume_valid = !!map.channels;
 
         /* When sink-volume mode is enabled, only update sink volume if route-volume
          * entry volume is modified. */
-        if ((r = get_route_volume_by_name(de->userdata, de->entry_name))) {
+        if ((r = ext_get_route_volume_by_name(de->userdata, de->entry_name))) {
             if (de->userdata->use_sink_volume) {
-                set_route_volumes(de->userdata, &e->volume);
-                _sink_set_volume(de->userdata->use_sink_volume->sink, &e->volume);
+                ext_set_route_volumes(de->userdata, &e->volume);
+                ext_sink_set_volume(de->userdata->use_sink_volume->sink, &e->volume);
             } else {
-                set_route_volume(r, &e->volume);
+                ext_set_route_volume(r, &e->volume);
             }
         }
 
-        key.data = de->entry_name;
-        key.size = strlen(de->entry_name);
-        value.data = e;
-        value.size = sizeof(struct entry);
-        pa_assert_se(pa_database_set(de->userdata->database, &key, &value, true) == 0);
-
-        if (!de->userdata->use_sink_volume) {
-            apply_entry(de->userdata, de->entry_name, e);
-            trigger_save(de->userdata);
-        }
+        pa_assert_se(entry_write(de->userdata, de->entry_name, e, true));
 
         if (e->volume_valid)
-            _proxy_volume(de->userdata, de->entry_name, &e->volume);
+            ext_proxy_volume(de->userdata, de->entry_name, &e->volume);
+
+        if (!de->userdata->use_sink_volume) {
+            entry_apply(de->userdata, de->entry_name, e);
+            trigger_save(de->userdata);
+        }
 
         send_volume_updated_signal(de, e);
     }
 
     pa_dbus_send_empty_reply(conn, msg);
 
-    pa_xfree(e);
+    entry_free(e);
 }
 
 static void handle_entry_get_mute(DBusConnection *conn, DBusMessage *msg, void *userdata) {
@@ -1188,13 +990,13 @@ static void handle_entry_get_mute(DBusConnection *conn, DBusMessage *msg, void *
     pa_assert(msg);
     pa_assert(de);
 
-    pa_assert_se(e = read_entry(de->userdata, de->entry_name));
+    pa_assert_se(e = entry_read(de->userdata, de->entry_name));
 
-    mute = e->muted_valid ? e->muted : false;
+    mute = e->muted_valid ? e->muted : FALSE;
 
     pa_dbus_send_basic_variant_reply(conn, msg, DBUS_TYPE_BOOLEAN, &mute);
 
-    pa_xfree(e);
+    entry_free(e);
 }
 
 static void handle_entry_set_mute(DBusConnection *conn, DBusMessage *msg, DBusMessageIter *iter, void *userdata) {
@@ -1210,31 +1012,24 @@ static void handle_entry_set_mute(DBusConnection *conn, DBusMessage *msg, DBusMe
 
     dbus_message_iter_get_basic(iter, &mute);
 
-    pa_assert_se(e = read_entry(de->userdata, de->entry_name));
+    pa_assert_se(e = entry_read(de->userdata, de->entry_name));
 
     updated = !e->muted_valid || e->muted != mute;
 
     if (updated) {
-        pa_datum key;
-        pa_datum value;
-
         e->muted = mute;
         e->muted_valid = true;
 
-        key.data = de->entry_name;
-        key.size = strlen(de->entry_name);
-        value.data = e;
-        value.size = sizeof(struct entry);
-        pa_assert_se(pa_database_set(de->userdata->database, &key, &value, true) == 0);
+        pa_assert_se(entry_write(de->userdata, de->entry_name, e, true));
 
-        apply_entry(de->userdata, de->entry_name, e);
+        entry_apply(de->userdata, de->entry_name, e);
         send_mute_updated_signal(de, e);
         trigger_save(de->userdata);
     }
 
     pa_dbus_send_empty_reply(conn, msg);
 
-    pa_xfree(e);
+    entry_free(e);
 }
 
 static void handle_entry_get_all(DBusConnection *conn, DBusMessage *msg, void *userdata) {
@@ -1251,10 +1046,10 @@ static void handle_entry_get_all(DBusConnection *conn, DBusMessage *msg, void *u
     pa_assert(msg);
     pa_assert(de);
 
-    pa_assert_se(e = read_entry(de->userdata, de->entry_name));
+    pa_assert_se(e = entry_read(de->userdata, de->entry_name));
 
     device = e->device_valid ? e->device : "";
-    mute = e->muted_valid ? e->muted : false;
+    mute = e->muted_valid ? e->muted : FALSE;
 
     pa_assert_se((reply = dbus_message_new_method_return(msg)));
 
@@ -1280,7 +1075,7 @@ static void handle_entry_get_all(DBusConnection *conn, DBusMessage *msg, void *u
 
     dbus_message_unref(reply);
 
-    pa_xfree(e);
+    entry_free(e);
 }
 
 static void handle_entry_remove(DBusConnection *conn, DBusMessage *msg, void *userdata) {
@@ -1299,41 +1094,259 @@ static void handle_entry_remove(DBusConnection *conn, DBusMessage *msg, void *us
     send_entry_removed_signal(de);
     trigger_save(de->userdata);
 
-    pa_assert_se(pa_hashmap_remove(de->userdata->dbus_entries, de->entry_name));
-    dbus_entry_free(de);
+    pa_assert_se(pa_hashmap_remove_and_free(de->userdata->dbus_entries, de->entry_name) >= 0);
 
     pa_dbus_send_empty_reply(conn, msg);
 }
 
-static char* _route_key(const char *name, const char *route) {
+#endif /* HAVE_DBUS */
+
+/* route extension functions */
+
+static void ext_sink_set_volume(pa_sink *s, const pa_cvolume *vol) {
+    pa_channel_map c;
+    pa_cvolume remapped;
+
+    pa_assert(s);
+    pa_assert(vol);
+    pa_assert(vol->channels == 1 || vol->channels == 2);
+
+    if (vol->channels == 1)
+        pa_channel_map_init_mono(&c);
+    else
+        pa_channel_map_init_stereo(&c);
+
+    remapped = *vol;
+    pa_sink_set_volume(s,
+                       pa_cvolume_remap(&remapped, &c, &s->channel_map),
+                       false,
+                       false);
+}
+
+static struct ext_sink_volume* ext_have_sink_volume(struct userdata *u, const char *mode) {
+    struct ext_sink_volume *v = NULL;
+
+    pa_assert(u);
+    pa_assert(mode);
+
+    for (v = u->sink_volumes; v; v = v->next) {
+        if (pa_streq(mode, v->mode)) {
+            if (!v->sink)
+                v->sink = pa_namereg_get(u->core, v->sink_name, PA_NAMEREG_SINK);
+
+            if (v->sink)
+                return v;
+            else
+                return NULL;
+        }
+    }
+
+    return NULL;
+}
+
+static void ext_free_sink_volumes(struct userdata *u) {
+    struct ext_sink_volume *v;
+
+    pa_assert(u);
+
+    while ((v = u->sink_volumes)) {
+        PA_LLIST_REMOVE(struct ext_sink_volume, u->sink_volumes, v);
+        pa_xfree(v->mode);
+        pa_xfree(v->sink_name);
+        pa_xfree(v);
+    }
+}
+
+/* return struct ext_route_volume* when entry with given
+ * name exists, otherwise return NULL */
+static struct ext_route_volume* ext_get_route_volume_by_name(struct userdata *u, const char *name) {
+    struct ext_route_volume *ret = NULL;
+    struct ext_route_volume *r;
+
+    PA_LLIST_FOREACH(r, u->route_volumes) {
+        if (pa_streq(name, r->name)) {
+            ret = r;
+            break;
+        }
+    }
+
+    return ret;
+}
+
+static void ext_set_route_volume(struct ext_route_volume *r, const pa_cvolume *volume) {
+    pa_assert(r);
+    pa_assert(pa_cvolume_valid(volume));
+
+    r->volume = *volume;
+}
+
+static void ext_set_route_volume_by_name(struct userdata *u, const char *name, const pa_cvolume *volume) {
+    struct ext_route_volume *r;
+
+    pa_assert(u);
+    pa_assert(name);
+    pa_assert(pa_cvolume_valid(volume));
+
+    if (!u->route)
+        return;
+
+    if ((r = ext_get_route_volume_by_name(u, name)))
+        ext_set_route_volume(r, volume);
+}
+
+static void ext_set_route_volumes(struct userdata *u, const pa_cvolume *volume) {
+    struct ext_route_volume *r;
+
+    pa_assert(u);
+    pa_assert(volume);
+    pa_assert(pa_cvolume_valid(volume));
+
+    PA_LLIST_FOREACH(r, u->route_volumes)
+        ext_set_route_volume(r, volume);
+}
+
+static void ext_set_stream(struct userdata *u, const char *name, const pa_volume_t volume, const int muted) {
+    pa_sink_input *si;
+    uint32_t idx;
+    pa_channel_map from;
+    pa_cvolume vol;
+
+    pa_assert(u);
+    pa_assert(name);
+
+    pa_cvolume_init(&vol);
+    pa_channel_map_init_mono(&from);
+
+    for (si = pa_idxset_first(u->core->sink_inputs, &idx); si; si = pa_idxset_next(u->core->sink_inputs, &idx)) {
+        char *n;
+
+        if (!si->sink) /* for eg. moving */
+            continue;
+
+        if (!(n = pa_proplist_get_stream_group(si->proplist, "sink-input", IDENTIFICATION_PROPERTY)))
+            continue;
+
+        if (!pa_streq(name, n)) {
+            pa_xfree(n);
+            continue;
+        }
+        pa_xfree(n);
+
+        if (si->volume_writable) {
+            pa_log_info("Restoring volume for sink input %s. c %d vol %d", name, from.channels, volume);
+            pa_cvolume_set(&vol, 1, volume);
+            pa_sink_input_set_volume(si, pa_cvolume_remap(&vol, &from, &si->channel_map), true, true);
+        }
+
+        if (muted > 0) {
+            pa_log_info("Restoring mute state for sink input %s.", name);
+            pa_sink_input_set_mute(si, !!muted, true);
+        }
+
+    }
+}
+
+static void ext_set_streams(struct userdata *u, const pa_volume_t volume, const int muted) {
+    struct ext_route_volume *r;
+
+    pa_assert(u);
+
+    for (r = u->route_volumes; r; r = r->next) {
+        ext_set_stream(u, r->name, volume, muted);
+    }
+}
+
+static void ext_proxy_volume(struct userdata *u, const char*name, const pa_cvolume *volume) {
+    pa_assert(u);
+    pa_assert(u->volume_proxy);
+    pa_assert(name);
+    pa_assert(volume);
+    pa_assert(pa_cvolume_valid(volume));
+
+    pa_volume_proxy_set_volume(u->volume_proxy, name, pa_cvolume_max(volume));
+}
+
+static void ext_proxy_volume_all(struct userdata *u) {
+    struct ext_route_volume *r;
+
+    pa_assert(u);
+    pa_assert(u->volume_proxy);
+
+    /* proxy all route volumes */
+    PA_LLIST_FOREACH(r, u->route_volumes)
+        ext_proxy_volume(u, r->name, &r->volume);
+}
+
+static pa_hook_result_t ext_volume_proxy_cb(pa_volume_proxy *p, const char *name, struct userdata *u) {
+    pa_volume_t vol;
+    pa_cvolume volume;
+    struct ext_route_volume *r;
+    bool changed = false;
+
+    if (!pa_volume_proxy_get_volume(p, name, &vol))
+        return PA_HOOK_OK;
+
+    if ((r = ext_get_route_volume_by_name(u, name))) {
+        int i;
+        for (i = 0; i < r->volume.channels; i++) {
+            if (vol != r->volume.values[i]) {
+                pa_cvolume_set(&r->volume, r->volume.channels, vol);
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    if (changed) {
+        if (u->use_sink_volume) {
+            pa_log_debug("ext_volume_proxy_cb() adjust sink-volume %u", vol);
+
+            pa_cvolume_init(&volume);
+            pa_cvolume_set(&volume, 1, vol);
+
+            /* set all route volumes to sink volume */
+            ext_set_route_volumes(u, &volume);
+            ext_sink_set_volume(u->use_sink_volume->sink, &volume);
+            ext_apply_route_volumes(u, false);
+            /* trigger_save() is going to be called in ext_sink_volume_subscribe_cb */
+        } else {
+            ext_apply_route_volumes(u, true);
+            trigger_save(u);
+        }
+    }
+
+    return PA_HOOK_OK;
+}
+
+static char* ext_route_key(const char *name, const char *route) {
     pa_assert(name);
     pa_assert(route);
 
     return pa_sprintf_malloc("%s:%s", name, route);
 }
 
-static void _free_route_volumes(struct userdata *u) {
-    struct route_volume *r;
+static void ext_free_route_volumes(struct userdata *u) {
+    struct ext_route_volume *r;
 
     pa_assert(u);
 
     while ((r = u->route_volumes)) {
-        PA_LLIST_REMOVE(struct route_volume, u->route_volumes, r);
+        PA_LLIST_REMOVE(struct ext_route_volume, u->route_volumes, r);
         pa_xfree(r->name);
         pa_xfree(r);
     }
 }
 
-static struct route_entry* read_route_entry(struct userdata *u, const char *name, const char *route) {
+static struct ext_route_entry* ext_read_route_entry(struct userdata *u, const char *name, const char *route) {
     pa_datum key, data;
     char *route_key;
-    struct route_entry *e;
+    struct ext_route_entry *e;
 
     pa_assert(u);
     pa_assert(name);
     pa_assert(route);
 
-    route_key = _route_key(name, route);
+    route_key = ext_route_key(name, route);
     key.data = (char*) route_key;
     key.size = strlen(route_key);
 
@@ -1344,16 +1357,16 @@ static struct route_entry* read_route_entry(struct userdata *u, const char *name
     if (!data.data)
         goto fail;
 
-    if (data.size != sizeof(struct route_entry)) {
+    if (data.size != sizeof(struct ext_route_entry)) {
         /* This is probably just a database upgrade, hence let's not
          * consider this more than a debug message */
-        pa_log_debug("Database contains entry for route %s of wrong size %lu != %lu. Probably due to uprade, ignoring.", route, (unsigned long) data.size, (unsigned long) sizeof(struct route_entry));
+        pa_log_debug("Database contains entry for route %s of wrong size %lu != %lu. Probably due to uprade, ignoring.", route, (unsigned long) data.size, (unsigned long) sizeof(struct ext_route_entry));
         goto fail;
     }
 
-    e = (struct route_entry*) data.data;
+    e = (struct ext_route_entry*) data.data;
 
-    if (e->version != ROUTE_ENTRY_VERSION) {
+    if (e->version != EXT_ROUTE_ENTRY_VERSION) {
         pa_log_debug("Version of database entry for route %s doesn't match our version. Probably due to upgrade, ignoring.", route);
         goto fail;
     }
@@ -1374,7 +1387,7 @@ fail:
     return NULL;
 }
 
-static bool entry_has_volume_changed(struct entry *a, struct entry *b) {
+static bool ext_entry_has_volume_changed(struct entry *a, struct entry *b) {
     pa_assert(a);
     pa_assert(b);
 
@@ -1388,61 +1401,62 @@ static bool entry_has_volume_changed(struct entry *a, struct entry *b) {
 
 /* Iterate through all route volumes and apply their value to corresponding streams
  * in s-r database */
-static void _apply_route_volumes(struct userdata *u, bool apply) {
+static void ext_apply_route_volumes(struct userdata *u, bool apply) {
 
     struct entry *old;
     pa_datum key, data;
-    struct route_volume *r;
+    struct ext_route_volume *r;
 
     pa_assert(u);
 
     for (r = u->route_volumes; r; r = r->next) {
-        struct entry entry;
+        struct entry *entry = NULL;
         struct dbus_entry *de = NULL;
 
-        if ((old = read_entry(u, r->name)))
-            entry = *old;
+        if ((old = entry_read(u, r->name)))
+            entry = entry_copy(old);
         else
             /* If there is a route volume specified for a non-existent restore
              * entry, the route volume is ignored. */
             continue;
 
-        entry.version = ENTRY_VERSION;
-        pa_channel_map_init_mono(&entry.channel_map);
-        pa_cvolume_set(&entry.volume, 1, r->volume.values[0]);
-        entry.volume_valid = true;
+        pa_cvolume_set(&entry->volume, entry->volume.channels, r->volume.values[0]);
+        entry->volume_valid = true;
 
-        if (!entry_has_volume_changed(old, &entry)) {
-            pa_xfree(old);
+        if (!ext_entry_has_volume_changed(old, entry)) {
+            entry_free(old);
+            entry_free(entry);
             continue;
         }
-        pa_xfree(old);
+        entry_free(old);
 
         key.data = (void*) r->name;
         key.size = (int)strlen(r->name);
 
-        data.data = (void*) &entry;
-        data.size = sizeof(entry);
+        data.data = (void*) entry;
+        data.size = sizeof(struct entry);
 
         pa_log_info("Updating route %s volume/mute/device for stream %s.", u->route, r->name);
-        pa_database_set(u->database, &key, &data, true);
+        entry_write(u, r->name, entry, true);
 
         pa_assert_se(de = pa_hashmap_get(u->dbus_entries, r->name));
-        send_volume_updated_signal(de, &entry);
+        send_volume_updated_signal(de, entry);
 
         if (apply)
-            apply_entry(u, r->name, &entry);
+            entry_apply(u, r->name, entry);
+
+        entry_free(entry);
     }
 }
 
-static void update_volumes(struct userdata *u) {
-    struct route_entry* e;
-    struct route_volume *r;
+static void ext_update_volumes(struct userdata *u) {
+    struct ext_route_entry* e;
+    struct ext_route_volume *r;
     char t[256];
 
     pa_assert(u);
 
-    if ((u->use_sink_volume = have_sink_volume(u, u->route)) != NULL) {
+    if ((u->use_sink_volume = ext_have_sink_volume(u, u->route)) != NULL) {
         pa_log_debug("Using sink-volume for mode %s.", u->route);
 
         if (u->subscription) {
@@ -1452,27 +1466,27 @@ static void update_volumes(struct userdata *u) {
         if (!u->sink_subscription)
             u->sink_subscription = pa_subscription_new(u->core,
                                                        PA_SUBSCRIPTION_MASK_SINK,
-                                                       sink_volume_subscribe_cb,
+                                                       ext_sink_volume_subscribe_cb,
                                                        u);
 
         if (u->route_volumes) {
             r = u->route_volumes;
-            e = read_route_entry(u, r->name, u->route);
+            e = ext_read_route_entry(u, r->name, u->route);
             if (e) {
                 r->volume = e->volume;
                 pa_xfree(e);
             } else {
                 r->volume = r->default_volume;
             }
-            set_route_volumes(u, &r->volume);
-            _set_streams(u, PA_VOLUME_NORM, -1);
+            ext_set_route_volumes(u, &r->volume);
+            ext_set_streams(u, PA_VOLUME_NORM, -1);
             pa_log_debug("Restoring volume to sink %s: %s", u->use_sink_volume->sink->name,
                                                             pa_cvolume_snprint(t, sizeof(t), &r->volume));
-            _sink_set_volume(u->use_sink_volume->sink, &r->volume);
-            _apply_route_volumes(u, false);
+            ext_sink_set_volume(u->use_sink_volume->sink, &r->volume);
+            ext_apply_route_volumes(u, false);
             trigger_save(u);
 
-            proxy_volume_all(u);
+            ext_proxy_volume_all(u);
         }
 
         return;
@@ -1498,7 +1512,7 @@ static void update_volumes(struct userdata *u) {
     /* instead, let's restore our configured streams */
 
     for (r = u->route_volumes; r; r = r->next) {
-        e = read_route_entry(u, r->name, u->route);
+        e = ext_read_route_entry(u, r->name, u->route);
 
         if (!e) {
             r->volume = r->default_volume;
@@ -1515,18 +1529,18 @@ static void update_volumes(struct userdata *u) {
             }
             pa_xfree(e);
         }
-        _proxy_volume(u, r->name, &r->volume);
+        ext_proxy_volume(u, r->name, &r->volume);
 
         pa_log_debug("Restored stream %s route %s volume=%s", r->name, u->route, pa_cvolume_snprint(t, sizeof(t), &r->volume));
     }
 
-    _apply_route_volumes(u, true);
+    ext_apply_route_volumes(u, true);
     trigger_save(u);
 
     return;
 }
 
-static void check_mode(const char *mode, struct userdata *u) {
+static void ext_check_mode(const char *mode, struct userdata *u) {
     pa_assert(mode);
     pa_assert(u);
 
@@ -1538,20 +1552,20 @@ static void check_mode(const char *mode, struct userdata *u) {
 
     u->route = pa_xstrdup(mode);
 
-    update_volumes(u);
+    ext_update_volumes(u);
 }
 
-static void check_sink_mode(pa_sink *s, struct userdata *u) {
+static void ext_check_sink_mode(pa_sink *s, struct userdata *u) {
     const char *mode;
 
     pa_assert(s);
     pa_assert(u);
 
     if ((mode = pa_proplist_gets(s->proplist, PA_NOKIA_PROP_AUDIO_MODE)))
-        check_mode(mode, u);
+        ext_check_mode(mode, u);
 }
 
-static pa_hook_result_t sink_proplist_changed_hook_callback(pa_core *c, pa_sink *s, struct userdata *u) {
+static pa_hook_result_t ext_sink_proplist_changed_hook_callback(pa_core *c, pa_sink *s, struct userdata *u) {
     pa_sink_input *i;
     uint32_t idx;
     const char *name;
@@ -1562,7 +1576,7 @@ static pa_hook_result_t sink_proplist_changed_hook_callback(pa_core *c, pa_sink 
     PA_IDXSET_FOREACH(i, s->inputs, idx) {
         name = pa_proplist_gets(i->proplist, PA_PROP_MEDIA_NAME);
         if (name && pa_streq(name, VOICE_MASTER_SINK_INPUT_NAME)) {
-            check_sink_mode(s, u);
+            ext_check_sink_mode(s, u);
             break;
         }
     }
@@ -1570,7 +1584,7 @@ static pa_hook_result_t sink_proplist_changed_hook_callback(pa_core *c, pa_sink 
     return PA_HOOK_OK;
 }
 
-static pa_hook_result_t hw_sink_input_move_finish_callback(pa_core *c, pa_sink_input *i, struct userdata *u) {
+static pa_hook_result_t ext_hw_sink_input_move_finish_callback(pa_core *c, pa_sink_input *i, struct userdata *u) {
     const char *name;
 
     pa_assert(i);
@@ -1579,368 +1593,21 @@ static pa_hook_result_t hw_sink_input_move_finish_callback(pa_core *c, pa_sink_i
     name = pa_proplist_gets(i->proplist, PA_PROP_MEDIA_NAME);
 
     if (i->sink && name && pa_streq(name, VOICE_MASTER_SINK_INPUT_NAME))
-        check_sink_mode(i->sink, u);
+        ext_check_sink_mode(i->sink, u);
 
     return PA_HOOK_OK;
 }
 
-static pa_hook_result_t parameters_changed_cb(pa_core *c, meego_parameter_update_args *ua, struct userdata *u) {
-    struct mv_volume_steps_set *set;
-    pa_proplist *p = NULL;
-    int ret = 0;
-
+static pa_hook_result_t ext_parameters_changed_cb(pa_core *c, meego_parameter_update_args *ua, struct userdata *u) {
     pa_assert(ua);
     pa_assert(u);
 
-    check_mode(ua->mode, u);
+    ext_check_mode(ua->mode, u);
 
     return PA_HOOK_OK;
 }
 
-static void save_time_callback(pa_mainloop_api*a, pa_time_event* e, const struct timeval *t, void *userdata) {
-    struct userdata *u = userdata;
-
-    pa_assert(a);
-    pa_assert(e);
-    pa_assert(u);
-
-    pa_assert(e == u->save_time_event);
-    u->core->mainloop->time_free(u->save_time_event);
-    u->save_time_event = NULL;
-
-    pa_database_sync(u->database);
-    pa_database_sync(u->route_database);
-
-    pa_log_info("Synced.");
-}
-
-static char *get_name(pa_proplist *p, const char *prefix) {
-    const char *r;
-    char *t;
-
-    if (!p)
-        return NULL;
-
-    if ((r = pa_proplist_gets(p, IDENTIFICATION_PROPERTY)))
-        return pa_xstrdup(r);
-
-    if ((r = pa_proplist_gets(p, PA_PROP_MEDIA_ROLE)))
-        t = pa_sprintf_malloc("%s-by-media-role:%s", prefix, r);
-    else if ((r = pa_proplist_gets(p, PA_PROP_APPLICATION_ID)))
-        t = pa_sprintf_malloc("%s-by-application-id:%s", prefix, r);
-    else if ((r = pa_proplist_gets(p, PA_PROP_APPLICATION_NAME)))
-        t = pa_sprintf_malloc("%s-by-application-name:%s", prefix, r);
-    else if ((r = pa_proplist_gets(p, PA_PROP_MEDIA_NAME)))
-        t = pa_sprintf_malloc("%s-by-media-name:%s", prefix, r);
-    else
-        t = pa_sprintf_malloc("%s-fallback:%s", prefix, r);
-
-    pa_proplist_sets(p, IDENTIFICATION_PROPERTY, t);
-    return t;
-}
-
-static struct entry *read_entry(struct userdata *u, const char *name) {
-    pa_datum key, data;
-    struct entry *e;
-
-    pa_assert(u);
-    pa_assert(name);
-
-    key.data = (char*) name;
-    key.size = strlen(name);
-
-    pa_zero(data);
-
-    if (!pa_database_get(u->database, &key, &data))
-        goto fail;
-
-    if (data.size != sizeof(struct entry)) {
-        /* This is probably just a database upgrade, hence let's not
-         * consider this more than a debug message */
-        pa_log_debug("Database contains entry for stream %s of wrong size %lu != %lu. Probably due to uprade, ignoring.", name, (unsigned long) data.size, (unsigned long) sizeof(struct entry));
-        goto fail;
-    }
-
-    e = (struct entry*) data.data;
-
-    if (e->version != ENTRY_VERSION) {
-        pa_log_debug("Version of database entry for stream %s doesn't match our version. Probably due to upgrade, ignoring.", name);
-        goto fail;
-    }
-
-    if (!memchr(e->device, 0, sizeof(e->device))) {
-        pa_log_warn("Database contains entry for stream %s with missing NUL byte in device name", name);
-        goto fail;
-    }
-
-    if (!memchr(e->card, 0, sizeof(e->card))) {
-        pa_log_warn("Database contains entry for stream %s with missing NUL byte in card name", name);
-        goto fail;
-    }
-
-    if (e->device_valid && !pa_namereg_is_valid_name(e->device)) {
-        pa_log_warn("Invalid device name stored in database for stream %s", name);
-        goto fail;
-    }
-
-    if (e->card_valid && !pa_namereg_is_valid_name(e->card)) {
-        pa_log_warn("Invalid card name stored in database for stream %s", name);
-        goto fail;
-    }
-
-    if (e->volume_valid && !pa_channel_map_valid(&e->channel_map)) {
-        pa_log_warn("Invalid channel map stored in database for stream %s", name);
-        goto fail;
-    }
-
-    if (e->volume_valid && (!pa_cvolume_valid(&e->volume) || !pa_cvolume_compatible_with_channel_map(&e->volume, &e->channel_map))) {
-        pa_log_warn("Invalid volume stored in database for stream %s", name);
-        goto fail;
-    }
-
-    return e;
-
-fail:
-
-    pa_datum_free(&data);
-    return NULL;
-}
-
-static void trigger_save(struct userdata *u) {
-    pa_native_connection *c;
-    uint32_t idx;
-    struct route_volume *r;
-
-    for (c = pa_idxset_first(u->subscribed, &idx); c; c = pa_idxset_next(u->subscribed, &idx)) {
-        pa_tagstruct *t;
-
-#if (PULSEAUDIO_VERSION >= 7)
-        t = pa_tagstruct_new();
-#else
-        t = pa_tagstruct_new(NULL, 0);
-#endif
-        pa_tagstruct_putu32(t, PA_COMMAND_EXTENSION);
-        pa_tagstruct_putu32(t, 0);
-        pa_tagstruct_putu32(t, u->module->index);
-        pa_tagstruct_puts(t, u->module->name);
-        pa_tagstruct_putu32(t, SUBCOMMAND_EVENT);
-
-        pa_pstream_send_tagstruct(pa_native_connection_get_pstream(c), t);
-    }
-
-    if (!u->restore_route_volume)
-        goto end;
-
-    if (!u->route)
-        goto end;
-
-    for (r = u->route_volumes; r; r = r->next) {
-        struct route_entry entry;
-        pa_datum key, data;
-        char *route_key;
-        char t[256];
-
-        if (!pa_cvolume_valid(&r->volume))
-            continue;
-
-        route_key = _route_key(r->name, u->route);
-
-        memset(&entry, 0, sizeof(entry));
-        entry.version = ROUTE_ENTRY_VERSION;
-        entry.volume = r->volume;
-
-        key.data = (void*) route_key;
-        key.size = (int) strlen(route_key);
-
-        data.data = (void*) &entry;
-        data.size = sizeof(entry);
-
-        pa_database_set(u->route_database, &key, &data, true);
-
-        pa_log_debug("Save stream %s route %s volume=%s", u->route, r->name, pa_cvolume_snprint(t, sizeof(t), &r->volume));
-
-        pa_xfree(route_key);
-    }
-
-end:
-    if (u->save_time_event)
-        return;
-
-    u->save_time_event = pa_core_rttime_new(u->core, pa_rtclock_now() + SAVE_INTERVAL, save_time_callback, u);
-}
-
-static bool entries_equal(const struct entry *a, const struct entry *b) {
-
-    pa_assert(a);
-    pa_assert(b);
-
-    if (a->device_valid != b->device_valid ||
-        (a->device_valid && strncmp(a->device, b->device, sizeof(a->device))))
-        return false;
-
-    if (a->card_valid != b->card_valid ||
-        (a->card_valid && strncmp(a->card, b->card, sizeof(a->card))))
-        return false;
-
-    if (a->muted_valid != b->muted_valid ||
-        (a->muted_valid && (a->muted != b->muted)))
-        return false;
-
-    if (a->volume_valid != b->volume_valid)
-        return false;
-
-    if (a->volume_valid && !pa_cvolume_equal(&a->volume, &b->volume))
-        return false;
-
-    return true;
-}
-
-static void subscribe_callback(pa_core *c, pa_subscription_event_type_t t, uint32_t idx, void *userdata) {
-    struct userdata *u = userdata;
-    struct entry entry, *old = NULL;
-    char *name = NULL;
-    pa_datum key, data;
-    bool created_new_entry = true;
-    bool device_updated = false;
-    bool volume_updated = false;
-    bool mute_updated = false;
-    struct dbus_entry *de = NULL;
-
-    pa_assert(c);
-    pa_assert(u);
-
-    if (t != (PA_SUBSCRIPTION_EVENT_SINK_INPUT|PA_SUBSCRIPTION_EVENT_NEW) &&
-        t != (PA_SUBSCRIPTION_EVENT_SINK_INPUT|PA_SUBSCRIPTION_EVENT_CHANGE) &&
-        t != (PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT|PA_SUBSCRIPTION_EVENT_NEW) &&
-        t != (PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT|PA_SUBSCRIPTION_EVENT_CHANGE))
-        return;
-
-    pa_zero(entry);
-    entry.version = ENTRY_VERSION;
-
-    if ((t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) == PA_SUBSCRIPTION_EVENT_SINK_INPUT) {
-        pa_sink_input *sink_input;
-
-        if (!(sink_input = pa_idxset_get_by_index(c->sink_inputs, idx)))
-            return;
-
-        if (!(name = get_name(sink_input->proplist, "sink-input")))
-            return;
-
-        if ((old = read_entry(u, name))) {
-            entry = *old;
-            created_new_entry = false;
-        }
-
-        if (sink_input->save_volume) {
-            pa_assert(sink_input->volume_writable);
-
-            entry.channel_map = sink_input->channel_map;
-            pa_sink_input_get_volume(sink_input, &entry.volume, false);
-            entry.volume_valid = true;
-
-            volume_updated = !created_new_entry
-                             && (!old->volume_valid
-                                 || !pa_channel_map_equal(&entry.channel_map, &old->channel_map)
-                                 || !pa_cvolume_equal(&entry.volume, &old->volume));
-        }
-
-        if (sink_input->save_muted) {
-            entry.muted = sink_input->muted;
-            entry.muted_valid = true;
-
-            mute_updated = !created_new_entry && (!old->muted_valid || entry.muted != old->muted);
-        }
-
-        if (sink_input->save_sink) {
-            pa_strlcpy(entry.device, sink_input->sink->name, sizeof(entry.device));
-            entry.device_valid = true;
-
-            device_updated = !created_new_entry && (!old->device_valid || !pa_streq(entry.device, old->device));
-            if (sink_input->sink->card) {
-                pa_strlcpy(entry.card, sink_input->sink->card->name, sizeof(entry.card));
-                entry.card_valid = true;
-            }
-        }
-
-    } else {
-        pa_source_output *source_output;
-
-        pa_assert((t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) == PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT);
-
-        if (!(source_output = pa_idxset_get_by_index(c->source_outputs, idx)))
-            return;
-
-        if (!(name = get_name(source_output->proplist, "source-output")))
-            return;
-
-        if ((old = read_entry(u, name))) {
-            entry = *old;
-            created_new_entry = false;
-        }
-
-        if (source_output->save_source) {
-            pa_strlcpy(entry.device, source_output->source->name, sizeof(entry.device));
-            entry.device_valid = source_output->save_source;
-
-            device_updated = !created_new_entry && (!old->device_valid || !pa_streq(entry.device, old->device));
-
-            if (source_output->source->card) {
-                pa_strlcpy(entry.card, source_output->source->card->name, sizeof(entry.card));
-                entry.card_valid = true;
-            }
-        }
-    }
-
-    if (old) {
-
-        if (entries_equal(old, &entry)) {
-            pa_xfree(old);
-            pa_xfree(name);
-            return;
-        }
-
-        pa_xfree(old);
-    }
-
-    if (entry.volume_valid) {
-        set_route_volume_by_name(u, name, &entry.volume);
-    }
-
-    key.data = name;
-    key.size = strlen(name);
-
-    data.data = &entry;
-    data.size = sizeof(entry);
-
-    pa_log_info("Storing volume/mute/device for stream %s.", name);
-
-    pa_database_set(u->database, &key, &data, true);
-
-    if (created_new_entry) {
-        de = dbus_entry_new(u, name);
-        pa_assert_se(pa_hashmap_put(u->dbus_entries, de->entry_name, de) == 0);
-        send_new_entry_signal(de);
-    } else {
-        pa_assert_se(de = pa_hashmap_get(u->dbus_entries, name));
-
-        if (device_updated)
-            send_device_updated_signal(de, &entry);
-        if (volume_updated)
-            send_volume_updated_signal(de, &entry);
-        if (mute_updated)
-            send_mute_updated_signal(de, &entry);
-    }
-
-    if (entry.volume_valid)
-        _proxy_volume(u, name, &entry.volume);
-
-    pa_xfree(name);
-
-    trigger_save(u);
-}
-
-static void sink_volume_subscribe_cb(pa_core *c, pa_subscription_event_type_t t, uint32_t idx, void *userdata) {
+static void ext_sink_volume_subscribe_cb(pa_core *c, pa_subscription_event_type_t t, uint32_t idx, void *userdata) {
     struct userdata *u = userdata;
     pa_sink *sink;
     const pa_cvolume *vol;
@@ -1965,426 +1632,19 @@ static void sink_volume_subscribe_cb(pa_core *c, pa_subscription_event_type_t t,
     vol = pa_sink_get_volume(sink, false);
 
     if (pa_cvolume_valid(vol)) {
-        pa_log_debug("sink_volume_subscribe_cb() sink volume changes to %u", pa_cvolume_max(vol));
+        pa_log_debug("ext_sink_volume_subscribe_cb() sink volume changes to %u", pa_cvolume_max(vol));
 
         /* set all route volumes to sink volume */
-        set_route_volumes(u, vol);
-        _apply_route_volumes(u, false);
+        ext_set_route_volumes(u, vol);
+        ext_apply_route_volumes(u, false);
         trigger_save(u);
 
         /* proxy all route volumes, since we have only one volume in sink-volume mode */
-        proxy_volume_all(u);
+        ext_proxy_volume_all(u);
     }
 }
 
-static pa_hook_result_t sink_input_new_hook_callback(pa_core *c, pa_sink_input_new_data *new_data, struct userdata *u) {
-    char *name;
-    struct entry *e;
-
-    pa_assert(c);
-    pa_assert(new_data);
-    pa_assert(u);
-    pa_assert(u->restore_device);
-
-    if (!(name = get_name(new_data->proplist, "sink-input")))
-        return PA_HOOK_OK;
-
-    if (new_data->sink)
-        pa_log_debug("Not restoring device for stream %s, because already set.", name);
-    else if ((e = read_entry(u, name))) {
-        pa_sink *s = NULL;
-
-        if (e->device_valid)
-            s = pa_namereg_get(c, e->device, PA_NAMEREG_SINK);
-
-        if (!s && e->card_valid) {
-            pa_card *card;
-
-            if ((card = pa_namereg_get(c, e->card, PA_NAMEREG_CARD)))
-                s = pa_idxset_first(card->sinks, NULL);
-        }
-
-        /* It might happen that a stream and a sink are set up at the
-           same time, in which case we want to make sure we don't
-           interfere with that */
-        if (s && PA_SINK_IS_LINKED(pa_sink_get_state(s))) {
-            pa_log_info("Restoring device for stream %s.", name);
-            new_data->sink = s;
-            new_data->save_sink = true;
-        }
-
-        pa_xfree(e);
-    }
-
-    pa_xfree(name);
-
-    return PA_HOOK_OK;
-}
-
-static pa_hook_result_t sink_input_fixate_hook_callback(pa_core *c, pa_sink_input_new_data *new_data, struct userdata *u) {
-    char *name;
-    struct entry *e;
-
-    pa_assert(c);
-    pa_assert(new_data);
-    pa_assert(u);
-    pa_assert(u->restore_volume || u->restore_muted);
-
-    if (!(name = get_name(new_data->proplist, "sink-input")))
-        return PA_HOOK_OK;
-
-    if ((e = read_entry(u, name))) {
-
-        if (u->restore_volume && e->volume_valid) {
-            if (!new_data->volume_writable)
-                pa_log_debug("Not restoring volume for sink input %s, because its volume is read-only.", name);
-            else if (new_data->volume_is_set)
-                pa_log_debug("Not restoring volume for sink input %s, because already set.", name);
-            else {
-                char buf[PA_CVOLUME_SNPRINT_MAX];
-
-                /* If we are in sink-volume mode and our route role streams appear, we set them to
-                 * PA_VOLUME_NORM */
-                if (u->use_sink_volume && (get_route_volume_by_name(u, name) != NULL))
-                    pa_cvolume_set(&e->volume, e->volume.channels, PA_VOLUME_NORM);
-
-                pa_log_info("Restoring volume for sink input %s.", name);
-                pa_sink_input_new_data_set_volume(new_data, pa_cvolume_remap(&e->volume, &e->channel_map, &new_data->channel_map));
-                pa_log_info("Restored volume: %s", pa_cvolume_snprint(buf, PA_CVOLUME_SNPRINT_MAX, &new_data->volume));
-            }
-        }
-
-        if (u->restore_muted && e->muted_valid) {
-
-            if (!new_data->muted_is_set) {
-                pa_log_info("Restoring mute state for sink input %s.", name);
-                pa_sink_input_new_data_set_muted(new_data, e->muted);
-                new_data->save_muted = true;
-            } else
-                pa_log_debug("Not restoring mute state for sink input %s, because already set.", name);
-        }
-
-        pa_xfree(e);
-    }
-
-    pa_xfree(name);
-
-    return PA_HOOK_OK;
-}
-
-static pa_hook_result_t source_output_new_hook_callback(pa_core *c, pa_source_output_new_data *new_data, struct userdata *u) {
-    char *name;
-    struct entry *e;
-
-    pa_assert(c);
-    pa_assert(new_data);
-    pa_assert(u);
-    pa_assert(u->restore_device);
-
-    if (new_data->direct_on_input)
-        return PA_HOOK_OK;
-
-    if (!(name = get_name(new_data->proplist, "source-output")))
-        return PA_HOOK_OK;
-
-    if (new_data->source)
-        pa_log_debug("Not restoring device for stream %s, because already set", name);
-    else if ((e = read_entry(u, name))) {
-        pa_source *s = NULL;
-
-        if (e->device_valid)
-            s = pa_namereg_get(c, e->device, PA_NAMEREG_SOURCE);
-
-        if (!s && e->card_valid) {
-            pa_card *card;
-
-            if ((card = pa_namereg_get(c, e->card, PA_NAMEREG_CARD)))
-                s = pa_idxset_first(card->sources, NULL);
-        }
-
-        /* It might happen that a stream and a sink are set up at the
-           same time, in which case we want to make sure we don't
-           interfere with that */
-        if (s && PA_SOURCE_IS_LINKED(pa_source_get_state(s))) {
-            pa_log_info("Restoring device for stream %s.", name);
-            new_data->source = s;
-            new_data->save_source = true;
-        }
-
-        pa_xfree(e);
-    }
-
-    pa_xfree(name);
-
-    return PA_HOOK_OK;
-}
-
-static pa_hook_result_t sink_put_hook_callback(pa_core *c, pa_sink *sink, struct userdata *u) {
-    pa_sink_input *si;
-    uint32_t idx;
-
-    pa_assert(c);
-    pa_assert(sink);
-    pa_assert(u);
-    pa_assert(u->on_hotplug && u->restore_device);
-
-    PA_IDXSET_FOREACH(si, c->sink_inputs, idx) {
-        char *name;
-        struct entry *e;
-
-        if (si->sink == sink)
-            continue;
-
-        if (si->save_sink)
-            continue;
-
-        /* Skip this if it is already in the process of being moved
-         * anyway */
-        if (!si->sink)
-            continue;
-
-        /* It might happen that a stream and a sink are set up at the
-           same time, in which case we want to make sure we don't
-           interfere with that */
-        if (!PA_SINK_INPUT_IS_LINKED(pa_sink_input_get_state(si)))
-            continue;
-
-        if (!(name = get_name(si->proplist, "sink-input")))
-            continue;
-
-        if ((e = read_entry(u, name))) {
-            if (e->device_valid && pa_streq(e->device, sink->name))
-                pa_sink_input_move_to(si, sink, true);
-
-            pa_xfree(e);
-        }
-
-        pa_xfree(name);
-    }
-
-    return PA_HOOK_OK;
-}
-
-static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source *source, struct userdata *u) {
-    pa_source_output *so;
-    uint32_t idx;
-
-    pa_assert(c);
-    pa_assert(source);
-    pa_assert(u);
-    pa_assert(u->on_hotplug && u->restore_device);
-
-    PA_IDXSET_FOREACH(so, c->source_outputs, idx) {
-        char *name;
-        struct entry *e;
-
-        if (so->source == source)
-            continue;
-
-        if (so->save_source)
-            continue;
-
-        if (so->direct_on_input)
-            continue;
-
-        /* Skip this if it is already in the process of being moved anyway */
-        if (!so->source)
-            continue;
-
-        /* It might happen that a stream and a source are set up at the
-           same time, in which case we want to make sure we don't
-           interfere with that */
-        if (!PA_SOURCE_OUTPUT_IS_LINKED(pa_source_output_get_state(so)))
-            continue;
-
-        if (!(name = get_name(so->proplist, "source-output")))
-            continue;
-
-        if ((e = read_entry(u, name))) {
-            if (e->device_valid && pa_streq(e->device, source->name))
-                pa_source_output_move_to(so, source, true);
-
-            pa_xfree(e);
-        }
-
-        pa_xfree(name);
-    }
-
-    return PA_HOOK_OK;
-}
-
-static pa_hook_result_t sink_unlink_hook_callback(pa_core *c, pa_sink *sink, struct userdata *u) {
-    pa_sink_input *si;
-    uint32_t idx;
-
-    pa_assert(c);
-    pa_assert(sink);
-    pa_assert(u);
-    pa_assert(u->on_rescue && u->restore_device);
-
-    /* There's no point in doing anything if the core is shut down anyway */
-    if (c->state == PA_CORE_SHUTDOWN)
-        return PA_HOOK_OK;
-
-    PA_IDXSET_FOREACH(si, sink->inputs, idx) {
-        char *name;
-        struct entry *e;
-
-        if (!si->sink)
-            continue;
-
-        if (!(name = get_name(si->proplist, "sink-input")))
-            continue;
-
-        if ((e = read_entry(u, name))) {
-
-            if (e->device_valid) {
-                pa_sink *d;
-
-                if ((d = pa_namereg_get(c, e->device, PA_NAMEREG_SINK)) &&
-                    d != sink &&
-                    PA_SINK_IS_LINKED(pa_sink_get_state(d)))
-                    pa_sink_input_move_to(si, d, true);
-            }
-
-            pa_xfree(e);
-        }
-
-        pa_xfree(name);
-    }
-
-    return PA_HOOK_OK;
-}
-
-static pa_hook_result_t source_unlink_hook_callback(pa_core *c, pa_source *source, struct userdata *u) {
-    pa_source_output *so;
-    uint32_t idx;
-
-    pa_assert(c);
-    pa_assert(source);
-    pa_assert(u);
-    pa_assert(u->on_rescue && u->restore_device);
-
-    /* There's no point in doing anything if the core is shut down anyway */
-    if (c->state == PA_CORE_SHUTDOWN)
-        return PA_HOOK_OK;
-
-    PA_IDXSET_FOREACH(so, source->outputs, idx) {
-        char *name;
-        struct entry *e;
-
-        if (so->direct_on_input)
-            continue;
-
-        if (!so->source)
-            continue;
-
-        if (!(name = get_name(so->proplist, "source-output")))
-            continue;
-
-        if ((e = read_entry(u, name))) {
-
-            if (e->device_valid) {
-                pa_source *d;
-
-                if ((d = pa_namereg_get(c, e->device, PA_NAMEREG_SOURCE)) &&
-                    d != source &&
-                    PA_SOURCE_IS_LINKED(pa_source_get_state(d)))
-                    pa_source_output_move_to(so, d, true);
-            }
-
-            pa_xfree(e);
-        }
-
-        pa_xfree(name);
-    }
-
-    return PA_HOOK_OK;
-}
-
-static int fill_db(struct userdata *u, const char *filename) {
-    FILE *f;
-    int n = 0;
-    int ret = -1;
-    char *fn = NULL;
-
-    pa_assert(u);
-
-    if (filename)
-        f = fopen(fn = pa_xstrdup(filename), "r");
-    else
-        f = pa_open_config_file(DEFAULT_FALLBACK_FILE, DEFAULT_FALLBACK_FILE_USER, NULL, &fn);
-
-    if (!f) {
-        pa_log("Failed to open file config file: %s", pa_cstrerror(errno));
-        goto finish;
-    }
-
-    pa_lock_fd(fileno(f), 1);
-
-    while (!feof(f)) {
-        char ln[256];
-        char *d, *v;
-        double db;
-
-        if (!fgets(ln, sizeof(ln), f))
-            break;
-
-        n++;
-
-        pa_strip_nl(ln);
-
-        if (ln[0] == '#' || !*ln )
-            continue;
-
-        d = ln+strcspn(ln, WHITESPACE);
-        v = d+strspn(d, WHITESPACE);
-        d[0] = '\0';
-
-        if (!*v) {
-            pa_log(__FILE__ ": [%s:%u] failed to parse line - too few words", filename, n);
-            goto finish;
-        }
-
-        *d = 0;
-        if (pa_atod(v, &db) >= 0) {
-            pa_datum key, data;
-            struct entry e;
-
-            memset(&e, 0, sizeof(e));
-            e.version = ENTRY_VERSION;
-            e.volume_valid = true;
-            pa_cvolume_set(&e.volume, 1, pa_sw_volume_from_dB(db));
-            pa_channel_map_init_mono(&e.channel_map);
-
-            key.data = (void*) ln;
-            key.size = strlen(ln);
-
-            data.data = (void*) &e;
-            data.size = sizeof(e);
-
-            /* save default volume only if it doesn't exist in database yet. */
-            if (pa_database_set(u->database, &key, &data, false) == 0)
-                pa_log_debug("Setting %s to %fdb", ln, db);
-        }
-    }
-
-    trigger_save(u);
-    ret = 0;
-
-finish:
-    if (f) {
-        pa_lock_fd(fileno(f), 0);
-        fclose(f);
-    }
-
-    if (fn)
-        pa_xfree(fn);
-
-    return ret;
-}
-
-static int fill_route_db(struct userdata *u, const char *filename) {
+static int ext_fill_route_db(struct userdata *u, const char *filename) {
     FILE *f;
     int n = 0;
     int ret = -1;
@@ -2433,10 +1693,10 @@ static int fill_route_db(struct userdata *u, const char *filename) {
 
         *d = 0;
         if (pa_atod(v, &db) >= 0) {
-            struct route_volume *r;
+            struct ext_route_volume *r;
 
-            r = pa_xnew0(struct route_volume, 1);
-            PA_LLIST_INIT(struct route_volume, r);
+            r = pa_xnew0(struct ext_route_volume, 1);
+            PA_LLIST_INIT(struct ext_route_volume, r);
 
             r->name = pa_xstrdup(ln);
             pa_cvolume_set(&r->volume, 1, pa_sw_volume_from_dB(db));
@@ -2452,7 +1712,7 @@ static int fill_route_db(struct userdata *u, const char *filename) {
             }
 
             /* append new route volume entry to list */
-            PA_LLIST_PREPEND(struct route_volume, u->route_volumes, r);
+            PA_LLIST_PREPEND(struct ext_route_volume, u->route_volumes, r);
         }
     }
 
@@ -2470,7 +1730,7 @@ finish:
     return ret;
 }
 
-static int fill_sink_db(struct userdata *u, const char *filename) {
+static int ext_fill_sink_db(struct userdata *u, const char *filename) {
     FILE *f;
     int n = 0;
     int ret = -1;
@@ -2493,7 +1753,7 @@ static int fill_sink_db(struct userdata *u, const char *filename) {
     while (!feof(f)) {
         char ln[256];
         char *d, *mode, *sink_name;
-        struct sink_volume *v;
+        struct ext_sink_volume *v;
 
         n++;
 
@@ -2515,14 +1775,14 @@ static int fill_sink_db(struct userdata *u, const char *filename) {
             goto finish;
         }
 
-        v = pa_xnew0(struct sink_volume, 1);
-        PA_LLIST_INIT(struct sink_volume, v);
+        v = pa_xnew0(struct ext_sink_volume, 1);
+        PA_LLIST_INIT(struct ext_sink_volume, v);
 
         v->mode = pa_xstrdup(mode);
         v->sink_name = pa_xstrdup(sink_name);
         v->sink = pa_namereg_get(u->core, sink_name, PA_NAMEREG_SINK);
 
-        PA_LLIST_PREPEND(struct sink_volume, u->sink_volumes, v);
+        PA_LLIST_PREPEND(struct ext_sink_volume, u->sink_volumes, v);
 
         pa_log_debug("sink-volume, mode \"%s\" controls sink \"%s\"", mode, sink_name);
     }
@@ -2541,7 +1801,966 @@ finish:
     return ret;
 }
 
-static void apply_entry(struct userdata *u, const char *name, struct entry *e) {
+/* route extension functions end */
+
+
+static void save_time_callback(pa_mainloop_api*a, pa_time_event* e, const struct timeval *t, void *userdata) {
+    struct userdata *u = userdata;
+
+    pa_assert(a);
+    pa_assert(e);
+    pa_assert(u);
+
+    pa_assert(e == u->save_time_event);
+    u->core->mainloop->time_free(u->save_time_event);
+    u->save_time_event = NULL;
+
+    pa_database_sync(u->database);
+    pa_database_sync(u->route_database);
+
+    pa_log_info("Synced.");
+}
+
+static struct entry* entry_new(void) {
+    struct entry *r = pa_xnew0(struct entry, 1);
+    r->version = ENTRY_VERSION;
+    return r;
+}
+
+static void entry_free(struct entry* e) {
+    pa_assert(e);
+
+    pa_xfree(e->device);
+    pa_xfree(e->card);
+    pa_xfree(e);
+}
+
+static bool entry_write(struct userdata *u, const char *name, const struct entry *e, bool replace) {
+    pa_tagstruct *t;
+    pa_datum key, data;
+    bool r;
+
+    pa_assert(u);
+    pa_assert(name);
+    pa_assert(e);
+
+    t = pa_tagstruct_new();
+    pa_tagstruct_putu8(t, e->version);
+    pa_tagstruct_put_boolean(t, e->volume_valid);
+    pa_tagstruct_put_channel_map(t, &e->channel_map);
+    pa_tagstruct_put_cvolume(t, &e->volume);
+    pa_tagstruct_put_boolean(t, e->muted_valid);
+    pa_tagstruct_put_boolean(t, e->muted);
+    pa_tagstruct_put_boolean(t, e->device_valid);
+    pa_tagstruct_puts(t, e->device);
+    pa_tagstruct_put_boolean(t, e->card_valid);
+    pa_tagstruct_puts(t, e->card);
+
+    key.data = (char *) name;
+    key.size = strlen(name);
+
+    data.data = (void*)pa_tagstruct_data(t, &data.size);
+
+    r = (pa_database_set(u->database, &key, &data, replace) == 0);
+
+    pa_tagstruct_free(t);
+
+    return r;
+}
+
+#ifdef ENABLE_LEGACY_DATABASE_ENTRY_FORMAT
+
+#define LEGACY_ENTRY_VERSION 3
+static struct entry *legacy_entry_read(struct userdata *u, const char *name) {
+    struct legacy_entry {
+        uint8_t version;
+        bool muted_valid:1, volume_valid:1, device_valid:1, card_valid:1;
+        bool muted:1;
+        pa_channel_map channel_map;
+        pa_cvolume volume;
+        char device[PA_NAME_MAX];
+        char card[PA_NAME_MAX];
+    } PA_GCC_PACKED;
+
+    pa_datum key;
+    pa_datum data;
+    struct legacy_entry *le;
+    struct entry *e;
+
+    pa_assert(u);
+    pa_assert(name);
+
+    key.data = (char *) name;
+    key.size = strlen(name);
+
+    pa_zero(data);
+
+    if (!pa_database_get(u->database, &key, &data))
+        goto fail;
+
+    if (data.size != sizeof(struct legacy_entry)) {
+        pa_log_debug("Size does not match.");
+        goto fail;
+    }
+
+    le = (struct legacy_entry *) data.data;
+
+    if (le->version != LEGACY_ENTRY_VERSION) {
+        pa_log_debug("Version mismatch.");
+        goto fail;
+    }
+
+    if (!memchr(le->device, 0, sizeof(le->device))) {
+        pa_log_warn("Device has missing NUL byte.");
+        goto fail;
+    }
+
+    if (!memchr(le->card, 0, sizeof(le->card))) {
+        pa_log_warn("Card has missing NUL byte.");
+        goto fail;
+    }
+
+    if (le->device_valid && !pa_namereg_is_valid_name(le->device)) {
+        pa_log_warn("Invalid device name stored in database for legacy stream");
+        goto fail;
+    }
+
+    if (le->card_valid && !pa_namereg_is_valid_name(le->card)) {
+        pa_log_warn("Invalid card name stored in database for legacy stream");
+        goto fail;
+    }
+
+    if (le->volume_valid && !pa_channel_map_valid(&le->channel_map)) {
+        pa_log_warn("Invalid channel map stored in database for legacy stream");
+        goto fail;
+    }
+
+    if (le->volume_valid && (!pa_cvolume_valid(&le->volume) || !pa_cvolume_compatible_with_channel_map(&le->volume, &le->channel_map))) {
+        pa_log_warn("Invalid volume stored in database for legacy stream");
+        goto fail;
+    }
+
+    e = entry_new();
+    e->muted_valid = le->muted_valid;
+    e->muted = le->muted;
+    e->volume_valid = le->volume_valid;
+    e->channel_map = le->channel_map;
+    e->volume = le->volume;
+    e->device_valid = le->device_valid;
+    e->device = pa_xstrdup(le->device);
+    e->card_valid = le->card_valid;
+    e->card = pa_xstrdup(le->card);
+    return e;
+
+fail:
+    pa_datum_free(&data);
+
+    return NULL;
+}
+#endif
+
+static struct entry *entry_read(struct userdata *u, const char *name) {
+    pa_datum key, data;
+    struct entry *e = NULL;
+    pa_tagstruct *t = NULL;
+    const char *device, *card;
+
+    pa_assert(u);
+    pa_assert(name);
+
+    key.data = (char*) name;
+    key.size = strlen(name);
+
+    pa_zero(data);
+
+    if (!pa_database_get(u->database, &key, &data))
+        goto fail;
+
+    t = pa_tagstruct_new_fixed(data.data, data.size);
+    e = entry_new();
+
+    if (pa_tagstruct_getu8(t, &e->version) < 0 ||
+        e->version > ENTRY_VERSION ||
+        pa_tagstruct_get_boolean(t, &e->volume_valid) < 0 ||
+        pa_tagstruct_get_channel_map(t, &e->channel_map) < 0 ||
+        pa_tagstruct_get_cvolume(t, &e->volume) < 0 ||
+        pa_tagstruct_get_boolean(t, &e->muted_valid) < 0 ||
+        pa_tagstruct_get_boolean(t, &e->muted) < 0 ||
+        pa_tagstruct_get_boolean(t, &e->device_valid) < 0 ||
+        pa_tagstruct_gets(t, &device) < 0 ||
+        pa_tagstruct_get_boolean(t, &e->card_valid) < 0 ||
+        pa_tagstruct_gets(t, &card) < 0) {
+
+        goto fail;
+    }
+
+    e->device = pa_xstrdup(device);
+    e->card = pa_xstrdup(card);
+
+    if (!pa_tagstruct_eof(t))
+        goto fail;
+
+    if (e->device_valid && !pa_namereg_is_valid_name(e->device)) {
+        pa_log_warn("Invalid device name stored in database for stream %s", name);
+        goto fail;
+    }
+
+    if (e->card_valid && !pa_namereg_is_valid_name(e->card)) {
+        pa_log_warn("Invalid card name stored in database for stream %s", name);
+        goto fail;
+    }
+
+    if (e->volume_valid && !pa_channel_map_valid(&e->channel_map)) {
+        pa_log_warn("Invalid channel map stored in database for stream %s", name);
+        goto fail;
+    }
+
+    if (e->volume_valid && (!pa_cvolume_valid(&e->volume) || !pa_cvolume_compatible_with_channel_map(&e->volume, &e->channel_map))) {
+        pa_log_warn("Invalid volume stored in database for stream %s", name);
+        goto fail;
+    }
+
+    pa_tagstruct_free(t);
+    pa_datum_free(&data);
+
+    return e;
+
+fail:
+    if (e)
+        entry_free(e);
+    if (t)
+        pa_tagstruct_free(t);
+
+    pa_datum_free(&data);
+    return NULL;
+}
+
+static struct entry* entry_copy(const struct entry *e) {
+    struct entry* r;
+
+    pa_assert(e);
+    r = entry_new();
+    *r = *e;
+    r->device = pa_xstrdup(e->device);
+    r->card = pa_xstrdup(e->card);
+    return r;
+}
+
+static void trigger_save(struct userdata *u) {
+    pa_native_connection *c;
+    uint32_t idx;
+    struct ext_route_volume *r;
+
+    PA_IDXSET_FOREACH(c, u->subscribed, idx) {
+        pa_tagstruct *t;
+
+#if (PULSEAUDIO_VERSION >= 7)
+        t = pa_tagstruct_new();
+#else
+        t = pa_tagstruct_new(NULL, 0);
+#endif
+        pa_tagstruct_putu32(t, PA_COMMAND_EXTENSION);
+        pa_tagstruct_putu32(t, 0);
+        pa_tagstruct_putu32(t, u->module->index);
+        pa_tagstruct_puts(t, u->module->name);
+        pa_tagstruct_putu32(t, SUBCOMMAND_EVENT);
+
+        pa_pstream_send_tagstruct(pa_native_connection_get_pstream(c), t);
+    }
+
+    if (!u->restore_route_volume)
+        goto end;
+
+    if (!u->route)
+        goto end;
+
+    for (r = u->route_volumes; r; r = r->next) {
+        struct ext_route_entry entry;
+        pa_datum key, data;
+        char *route_key;
+        char t[256];
+
+        if (!pa_cvolume_valid(&r->volume))
+            continue;
+
+        route_key = ext_route_key(r->name, u->route);
+
+        memset(&entry, 0, sizeof(entry));
+        entry.version = EXT_ROUTE_ENTRY_VERSION;
+        entry.volume = r->volume;
+
+        key.data = (void*) route_key;
+        key.size = (int) strlen(route_key);
+
+        data.data = (void*) &entry;
+        data.size = sizeof(entry);
+
+        pa_database_set(u->route_database, &key, &data, true);
+
+        pa_log_debug("Save stream %s route %s volume=%s", u->route, r->name, pa_cvolume_snprint(t, sizeof(t), &r->volume));
+
+        pa_xfree(route_key);
+    }
+
+end:
+    if (u->save_time_event)
+        return;
+
+    u->save_time_event = pa_core_rttime_new(u->core, pa_rtclock_now() + SAVE_INTERVAL, save_time_callback, u);
+}
+
+static bool entries_equal(const struct entry *a, const struct entry *b) {
+    pa_cvolume t;
+
+    pa_assert(a);
+    pa_assert(b);
+
+    if (a->device_valid != b->device_valid ||
+        (a->device_valid && !pa_streq(a->device, b->device)))
+        return false;
+
+    if (a->card_valid != b->card_valid ||
+        (a->card_valid && !pa_streq(a->card, b->card)))
+        return false;
+
+    if (a->muted_valid != b->muted_valid ||
+        (a->muted_valid && (a->muted != b->muted)))
+        return false;
+
+    t = b->volume;
+    if (a->volume_valid != b->volume_valid ||
+        (a->volume_valid && !pa_cvolume_equal(pa_cvolume_remap(&t, &b->channel_map, &a->channel_map), &a->volume)))
+        return false;
+
+    return true;
+}
+
+static void subscribe_callback(pa_core *c, pa_subscription_event_type_t t, uint32_t idx, void *userdata) {
+    struct userdata *u = userdata;
+    struct entry *entry, *old = NULL;
+    char *name = NULL;
+
+    /* These are only used when D-Bus is enabled, but in order to reduce ifdef
+     * clutter these are defined here unconditionally. */
+    bool created_new_entry = true;
+    bool device_updated = false;
+    bool volume_updated = false;
+    bool mute_updated = false;
+
+#ifdef HAVE_DBUS
+    struct dbus_entry *de = NULL;
+#endif
+
+    pa_assert(c);
+    pa_assert(u);
+
+    if (t != (PA_SUBSCRIPTION_EVENT_SINK_INPUT|PA_SUBSCRIPTION_EVENT_NEW) &&
+        t != (PA_SUBSCRIPTION_EVENT_SINK_INPUT|PA_SUBSCRIPTION_EVENT_CHANGE) &&
+        t != (PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT|PA_SUBSCRIPTION_EVENT_NEW) &&
+        t != (PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT|PA_SUBSCRIPTION_EVENT_CHANGE))
+        return;
+
+    if ((t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) == PA_SUBSCRIPTION_EVENT_SINK_INPUT) {
+        pa_sink_input *sink_input;
+
+        if (!(sink_input = pa_idxset_get_by_index(c->sink_inputs, idx)))
+            return;
+
+        if (!(name = pa_proplist_get_stream_group(sink_input->proplist, "sink-input", IDENTIFICATION_PROPERTY)))
+            return;
+
+        if ((old = entry_read(u, name))) {
+            entry = entry_copy(old);
+            created_new_entry = false;
+        } else
+            entry = entry_new();
+
+        if (sink_input->save_volume && pa_sink_input_is_volume_readable(sink_input)) {
+            pa_assert(sink_input->volume_writable);
+
+            entry->channel_map = sink_input->channel_map;
+            pa_sink_input_get_volume(sink_input, &entry->volume, false);
+            entry->volume_valid = true;
+
+            volume_updated = !created_new_entry
+                             && (!old->volume_valid
+                                 || !pa_channel_map_equal(&entry->channel_map, &old->channel_map)
+                                 || !pa_cvolume_equal(&entry->volume, &old->volume));
+        }
+
+        if (sink_input->save_muted) {
+            entry->muted = sink_input->muted;
+            entry->muted_valid = true;
+
+            mute_updated = !created_new_entry && (!old->muted_valid || entry->muted != old->muted);
+        }
+
+        if (sink_input->save_sink) {
+            pa_xfree(entry->device);
+            entry->device = pa_xstrdup(sink_input->sink->name);
+            entry->device_valid = true;
+
+            device_updated = !created_new_entry && (!old->device_valid || !pa_streq(entry->device, old->device));
+            if (sink_input->sink->card) {
+                pa_xfree(entry->card);
+                entry->card = pa_xstrdup(sink_input->sink->card->name);
+                entry->card_valid = true;
+            }
+        }
+
+    } else {
+        pa_source_output *source_output;
+
+        pa_assert((t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) == PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT);
+
+        if (!(source_output = pa_idxset_get_by_index(c->source_outputs, idx)))
+            return;
+
+        if (!(name = pa_proplist_get_stream_group(source_output->proplist, "source-output", IDENTIFICATION_PROPERTY)))
+            return;
+
+        if ((old = entry_read(u, name))) {
+            entry = entry_copy(old);
+            created_new_entry = false;
+        } else
+            entry = entry_new();
+
+        if (source_output->save_volume && pa_source_output_is_volume_readable(source_output)) {
+            pa_assert(source_output->volume_writable);
+
+            entry->channel_map = source_output->channel_map;
+            pa_source_output_get_volume(source_output, &entry->volume, false);
+            entry->volume_valid = true;
+
+            volume_updated = !created_new_entry
+                             && (!old->volume_valid
+                                 || !pa_channel_map_equal(&entry->channel_map, &old->channel_map)
+                                 || !pa_cvolume_equal(&entry->volume, &old->volume));
+        }
+
+        if (source_output->save_muted) {
+            entry->muted = source_output->muted;
+            entry->muted_valid = true;
+
+            mute_updated = !created_new_entry && (!old->muted_valid || entry->muted != old->muted);
+        }
+
+        if (source_output->save_source) {
+            pa_xfree(entry->device);
+            entry->device = pa_xstrdup(source_output->source->name);
+            entry->device_valid = true;
+
+            device_updated = !created_new_entry && (!old->device_valid || !pa_streq(entry->device, old->device));
+
+            if (source_output->source->card) {
+                pa_xfree(entry->card);
+                entry->card = pa_xstrdup(source_output->source->card->name);
+                entry->card_valid = true;
+            }
+        }
+    }
+
+    pa_assert(entry);
+
+    if (old) {
+
+        if (entries_equal(old, entry)) {
+            entry_free(old);
+            entry_free(entry);
+            pa_xfree(name);
+            return;
+        }
+
+        entry_free(old);
+    }
+
+    if (entry->volume_valid) {
+        ext_set_route_volume_by_name(u, name, &entry->volume);
+    }
+
+    pa_log_info("Storing volume/mute/device for stream %s.", name);
+
+    if (entry_write(u, name, entry, true))
+        trigger_save(u);
+
+#ifdef HAVE_DBUS
+    if (created_new_entry) {
+        de = dbus_entry_new(u, name);
+        pa_assert_se(pa_hashmap_put(u->dbus_entries, de->entry_name, de) == 0);
+        send_new_entry_signal(de);
+    } else {
+        pa_assert_se(de = pa_hashmap_get(u->dbus_entries, name));
+
+        if (device_updated)
+            send_device_updated_signal(de, entry);
+        if (volume_updated)
+            send_volume_updated_signal(de, entry);
+        if (mute_updated)
+            send_mute_updated_signal(de, entry);
+    }
+#endif
+
+    if (entry->volume_valid)
+        ext_proxy_volume(u, name, &entry->volume);
+
+    entry_free(entry);
+    pa_xfree(name);
+}
+
+static pa_hook_result_t sink_input_new_hook_callback(pa_core *c, pa_sink_input_new_data *new_data, struct userdata *u) {
+    char *name;
+    struct entry *e;
+
+    pa_assert(c);
+    pa_assert(new_data);
+    pa_assert(u);
+    pa_assert(u->restore_device);
+
+    if (!(name = pa_proplist_get_stream_group(new_data->proplist, "sink-input", IDENTIFICATION_PROPERTY)))
+        return PA_HOOK_OK;
+
+    if (new_data->sink)
+        pa_log_debug("Not restoring device for stream %s, because already set to '%s'.", name, new_data->sink->name);
+    else if ((e = entry_read(u, name))) {
+        pa_sink *s = NULL;
+
+        if (e->device_valid)
+            s = pa_namereg_get(c, e->device, PA_NAMEREG_SINK);
+
+        if (!s && e->card_valid) {
+            pa_card *card;
+
+            if ((card = pa_namereg_get(c, e->card, PA_NAMEREG_CARD)))
+                s = pa_idxset_first(card->sinks, NULL);
+        }
+
+        /* It might happen that a stream and a sink are set up at the
+           same time, in which case we want to make sure we don't
+           interfere with that */
+        if (s && PA_SINK_IS_LINKED(pa_sink_get_state(s)))
+            if (pa_sink_input_new_data_set_sink(new_data, s, true))
+                pa_log_info("Restoring device for stream %s.", name);
+
+        entry_free(e);
+    }
+
+    pa_xfree(name);
+
+    return PA_HOOK_OK;
+}
+
+static pa_hook_result_t sink_input_fixate_hook_callback(pa_core *c, pa_sink_input_new_data *new_data, struct userdata *u) {
+    char *name;
+    struct entry *e;
+
+    pa_assert(c);
+    pa_assert(new_data);
+    pa_assert(u);
+    pa_assert(u->restore_volume || u->restore_muted);
+
+    if (!(name = pa_proplist_get_stream_group(new_data->proplist, "sink-input", IDENTIFICATION_PROPERTY)))
+        return PA_HOOK_OK;
+
+    if ((e = entry_read(u, name))) {
+
+        if (u->restore_volume && e->volume_valid) {
+            if (!new_data->volume_writable)
+                pa_log_debug("Not restoring volume for sink input %s, because its volume can't be changed.", name);
+            else if (new_data->volume_is_set)
+                pa_log_debug("Not restoring volume for sink input %s, because already set.", name);
+            else {
+                pa_cvolume v;
+
+                /* If we are in sink-volume mode and our route role streams appear, we set them to
+                 * PA_VOLUME_NORM */
+                if (u->use_sink_volume && (ext_get_route_volume_by_name(u, name) != NULL))
+                    pa_cvolume_set(&e->volume, e->volume.channels, PA_VOLUME_NORM);
+
+                pa_log_info("Restoring volume for sink input %s.", name);
+
+                v = e->volume;
+                pa_cvolume_remap(&v, &e->channel_map, &new_data->channel_map);
+                pa_sink_input_new_data_set_volume(new_data, &v);
+
+                new_data->volume_is_absolute = false;
+                new_data->save_volume = true;
+            }
+        }
+
+        if (u->restore_muted && e->muted_valid) {
+
+            if (!new_data->muted_is_set) {
+                pa_log_info("Restoring mute state for sink input %s.", name);
+                pa_sink_input_new_data_set_muted(new_data, e->muted);
+                new_data->save_muted = true;
+            } else
+                pa_log_debug("Not restoring mute state for sink input %s, because already set.", name);
+        }
+
+        entry_free(e);
+    }
+
+    pa_xfree(name);
+
+    return PA_HOOK_OK;
+}
+
+static pa_hook_result_t source_output_new_hook_callback(pa_core *c, pa_source_output_new_data *new_data, struct userdata *u) {
+    char *name;
+    struct entry *e;
+
+    pa_assert(c);
+    pa_assert(new_data);
+    pa_assert(u);
+    pa_assert(u->restore_device);
+
+    if (new_data->direct_on_input)
+        return PA_HOOK_OK;
+
+    if (!(name = pa_proplist_get_stream_group(new_data->proplist, "source-output", IDENTIFICATION_PROPERTY)))
+        return PA_HOOK_OK;
+
+    if (new_data->source)
+        pa_log_debug("Not restoring device for stream %s, because already set", name);
+    else if ((e = entry_read(u, name))) {
+        pa_source *s = NULL;
+
+        if (e->device_valid)
+            s = pa_namereg_get(c, e->device, PA_NAMEREG_SOURCE);
+
+        if (!s && e->card_valid) {
+            pa_card *card;
+
+            if ((card = pa_namereg_get(c, e->card, PA_NAMEREG_CARD)))
+                s = pa_idxset_first(card->sources, NULL);
+        }
+
+        /* It might happen that a stream and a sink are set up at the
+           same time, in which case we want to make sure we don't
+           interfere with that */
+        if (s && PA_SOURCE_IS_LINKED(pa_source_get_state(s))) {
+            pa_log_info("Restoring device for stream %s.", name);
+            pa_source_output_new_data_set_source(new_data, s, true);
+        }
+
+        entry_free(e);
+    }
+
+    pa_xfree(name);
+
+    return PA_HOOK_OK;
+}
+
+static pa_hook_result_t source_output_fixate_hook_callback(pa_core *c, pa_source_output_new_data *new_data, struct userdata *u) {
+    char *name;
+    struct entry *e;
+
+    pa_assert(c);
+    pa_assert(new_data);
+    pa_assert(u);
+    pa_assert(u->restore_volume || u->restore_muted);
+
+    if (!(name = pa_proplist_get_stream_group(new_data->proplist, "source-output", IDENTIFICATION_PROPERTY)))
+        return PA_HOOK_OK;
+
+    if ((e = entry_read(u, name))) {
+
+        if (u->restore_volume && e->volume_valid) {
+            if (!new_data->volume_writable)
+                pa_log_debug("Not restoring volume for source output %s, because its volume can't be changed.", name);
+            else if (new_data->volume_is_set)
+                pa_log_debug("Not restoring volume for source output %s, because already set.", name);
+            else {
+                pa_cvolume v;
+
+                pa_log_info("Restoring volume for source output %s.", name);
+
+                v = e->volume;
+                pa_cvolume_remap(&v, &e->channel_map, &new_data->channel_map);
+                pa_source_output_new_data_set_volume(new_data, &v);
+
+                new_data->volume_is_absolute = false;
+                new_data->save_volume = true;
+            }
+        }
+
+        if (u->restore_muted && e->muted_valid) {
+
+            if (!new_data->muted_is_set) {
+                pa_log_info("Restoring mute state for source output %s.", name);
+                pa_source_output_new_data_set_muted(new_data, e->muted);
+                new_data->save_muted = true;
+            } else
+                pa_log_debug("Not restoring mute state for source output %s, because already set.", name);
+        }
+
+        entry_free(e);
+    }
+
+    pa_xfree(name);
+
+    return PA_HOOK_OK;
+}
+
+static pa_hook_result_t sink_put_hook_callback(pa_core *c, pa_sink *sink, struct userdata *u) {
+    pa_sink_input *si;
+    uint32_t idx;
+
+    pa_assert(c);
+    pa_assert(sink);
+    pa_assert(u);
+    pa_assert(u->on_hotplug && u->restore_device);
+
+    PA_IDXSET_FOREACH(si, c->sink_inputs, idx) {
+        char *name;
+        struct entry *e;
+
+        if (si->sink == sink)
+            continue;
+
+        if (si->save_sink)
+            continue;
+
+        /* Skip this if it is already in the process of being moved
+         * anyway */
+        if (!si->sink)
+            continue;
+
+        /* It might happen that a stream and a sink are set up at the
+           same time, in which case we want to make sure we don't
+           interfere with that */
+        if (!PA_SINK_INPUT_IS_LINKED(pa_sink_input_get_state(si)))
+            continue;
+
+        if (!(name = pa_proplist_get_stream_group(si->proplist, "sink-input", IDENTIFICATION_PROPERTY)))
+            continue;
+
+        if ((e = entry_read(u, name))) {
+            if (e->device_valid && pa_streq(e->device, sink->name))
+                pa_sink_input_move_to(si, sink, true);
+
+            entry_free(e);
+        }
+
+        pa_xfree(name);
+    }
+
+    return PA_HOOK_OK;
+}
+
+static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source *source, struct userdata *u) {
+    pa_source_output *so;
+    uint32_t idx;
+
+    pa_assert(c);
+    pa_assert(source);
+    pa_assert(u);
+    pa_assert(u->on_hotplug && u->restore_device);
+
+    PA_IDXSET_FOREACH(so, c->source_outputs, idx) {
+        char *name;
+        struct entry *e;
+
+        if (so->source == source)
+            continue;
+
+        if (so->save_source)
+            continue;
+
+        if (so->direct_on_input)
+            continue;
+
+        /* Skip this if it is already in the process of being moved anyway */
+        if (!so->source)
+            continue;
+
+        /* It might happen that a stream and a source are set up at the
+           same time, in which case we want to make sure we don't
+           interfere with that */
+        if (!PA_SOURCE_OUTPUT_IS_LINKED(pa_source_output_get_state(so)))
+            continue;
+
+        if (!(name = pa_proplist_get_stream_group(so->proplist, "source-output", IDENTIFICATION_PROPERTY)))
+            continue;
+
+        if ((e = entry_read(u, name))) {
+            if (e->device_valid && pa_streq(e->device, source->name))
+                pa_source_output_move_to(so, source, true);
+
+            entry_free(e);
+        }
+
+        pa_xfree(name);
+    }
+
+    return PA_HOOK_OK;
+}
+
+static pa_hook_result_t sink_unlink_hook_callback(pa_core *c, pa_sink *sink, struct userdata *u) {
+    pa_sink_input *si;
+    uint32_t idx;
+
+    pa_assert(c);
+    pa_assert(sink);
+    pa_assert(u);
+    pa_assert(u->on_rescue && u->restore_device);
+
+    /* There's no point in doing anything if the core is shut down anyway */
+    if (c->state == PA_CORE_SHUTDOWN)
+        return PA_HOOK_OK;
+
+    PA_IDXSET_FOREACH(si, sink->inputs, idx) {
+        char *name;
+        struct entry *e;
+
+        if (!si->sink)
+            continue;
+
+        if (!(name = pa_proplist_get_stream_group(si->proplist, "sink-input", IDENTIFICATION_PROPERTY)))
+            continue;
+
+        if ((e = entry_read(u, name))) {
+
+            if (e->device_valid) {
+                pa_sink *d;
+
+                if ((d = pa_namereg_get(c, e->device, PA_NAMEREG_SINK)) &&
+                    d != sink &&
+                    PA_SINK_IS_LINKED(pa_sink_get_state(d)))
+                    pa_sink_input_move_to(si, d, true);
+            }
+
+            entry_free(e);
+        }
+
+        pa_xfree(name);
+    }
+
+    return PA_HOOK_OK;
+}
+
+static pa_hook_result_t source_unlink_hook_callback(pa_core *c, pa_source *source, struct userdata *u) {
+    pa_source_output *so;
+    uint32_t idx;
+
+    pa_assert(c);
+    pa_assert(source);
+    pa_assert(u);
+    pa_assert(u->on_rescue && u->restore_device);
+
+    /* There's no point in doing anything if the core is shut down anyway */
+    if (c->state == PA_CORE_SHUTDOWN)
+        return PA_HOOK_OK;
+
+    PA_IDXSET_FOREACH(so, source->outputs, idx) {
+        char *name;
+        struct entry *e;
+
+        if (so->direct_on_input)
+            continue;
+
+        if (!so->source)
+            continue;
+
+        if (!(name = pa_proplist_get_stream_group(so->proplist, "source-output", IDENTIFICATION_PROPERTY)))
+            continue;
+
+        if ((e = entry_read(u, name))) {
+
+            if (e->device_valid) {
+                pa_source *d;
+
+                if ((d = pa_namereg_get(c, e->device, PA_NAMEREG_SOURCE)) &&
+                    d != source &&
+                    PA_SOURCE_IS_LINKED(pa_source_get_state(d)))
+                    pa_source_output_move_to(so, d, true);
+            }
+
+            entry_free(e);
+        }
+
+        pa_xfree(name);
+    }
+
+    return PA_HOOK_OK;
+}
+
+static int fill_db(struct userdata *u, const char *filename) {
+    FILE *f;
+    int n = 0;
+    int ret = -1;
+    char *fn = NULL;
+
+    pa_assert(u);
+
+    if (filename)
+        f = fopen(fn = pa_xstrdup(filename), "r");
+    else
+        f = pa_open_config_file(DEFAULT_FALLBACK_FILE, DEFAULT_FALLBACK_FILE_USER, NULL, &fn);
+
+    if (!f) {
+        if (filename)
+            pa_log("Failed to open %s: %s", filename, pa_cstrerror(errno));
+        else
+            ret = 0;
+
+        goto finish;
+    }
+
+    while (!feof(f)) {
+        char ln[256];
+        char *d, *v;
+        double db;
+
+        if (!fgets(ln, sizeof(ln), f))
+            break;
+
+        n++;
+
+        pa_strip_nl(ln);
+
+        if (!*ln || ln[0] == '#' || ln[0] == ';')
+            continue;
+
+        d = ln+strcspn(ln, WHITESPACE);
+        v = d+strspn(d, WHITESPACE);
+
+        if (!*v) {
+            pa_log("[%s:%u] failed to parse line - too few words", fn, n);
+            goto finish;
+        }
+
+        *d = 0;
+        if (pa_atod(v, &db) >= 0) {
+            if (db <= 0.0) {
+                struct entry e;
+                pa_zero(e);
+                e.version = ENTRY_VERSION;
+                e.volume_valid = true;
+                pa_cvolume_set(&e.volume, 1, pa_sw_volume_from_dB(db));
+                pa_channel_map_init_mono(&e.channel_map);
+
+                if (entry_write(u, ln, &e, false))
+                    pa_log_debug("Setting %s to %0.2f dB.", ln, db);
+            } else
+                pa_log_warn("[%s:%u] Positive dB values are not allowed, not setting entry %s.", fn, n, ln);
+        } else
+            pa_log_warn("[%s:%u] Couldn't parse '%s' as a double, not setting entry %s.", fn, n, v, ln);
+    }
+
+    trigger_save(u);
+    ret = 0;
+
+finish:
+    if (f)
+        fclose(f);
+
+    pa_xfree(fn);
+
+    return ret;
+}
+
+static void entry_apply(struct userdata *u, const char *name, struct entry *e) {
     pa_sink_input *si;
     pa_source_output *so;
     uint32_t idx;
@@ -2554,10 +2773,7 @@ static void apply_entry(struct userdata *u, const char *name, struct entry *e) {
         char *n;
         pa_sink *s;
 
-        if (!si->sink) /* for eg. moving */
-            continue;
-
-        if (!(n = get_name(si->proplist, "sink-input")))
+        if (!(n = pa_proplist_get_stream_group(si->proplist, "sink-input", IDENTIFICATION_PROPERTY)))
             continue;
 
         if (!pa_streq(name, n)) {
@@ -2571,7 +2787,9 @@ static void apply_entry(struct userdata *u, const char *name, struct entry *e) {
 
             pa_log_info("Restoring volume for sink input %s. c %d vol %d", name, e->channel_map.channels, e->volume.values[0]);
             v = e->volume;
-            pa_sink_input_set_volume(si, pa_cvolume_remap(&v, &e->channel_map, &si->channel_map), true, false);
+            pa_log_info("Restoring volume for sink input %s.", name);
+            pa_cvolume_remap(&v, &e->channel_map, &si->channel_map);
+            pa_sink_input_set_volume(si, &v, true, false);
         }
 
         if (u->restore_muted && e->muted_valid) {
@@ -2579,12 +2797,24 @@ static void apply_entry(struct userdata *u, const char *name, struct entry *e) {
             pa_sink_input_set_mute(si, e->muted, true);
         }
 
-        if (u->restore_device &&
-            e->device_valid &&
-            (s = pa_namereg_get(u->core, e->device, PA_NAMEREG_SINK))) {
-
-            pa_log_info("Restoring device for stream %s.", name);
-            pa_sink_input_move_to(si, s, true);
+        if (u->restore_device) {
+            if (!e->device_valid) {
+                if (si->save_sink) {
+                    pa_log_info("Ensuring device is not saved for stream %s.", name);
+                    /* If the device is not valid we should make sure the
+                       save flag is cleared as the user may have specifically
+                       removed the sink element from the rule. */
+                    si->save_sink = false;
+                    /* This is cheating a bit. The sink input itself has not changed
+                       but the rules governing its routing have, so we fire this event
+                       such that other routing modules (e.g. module-device-manager)
+                       will pick up the change and reapply their routing */
+                    pa_subscription_post(si->core, PA_SUBSCRIPTION_EVENT_SINK_INPUT|PA_SUBSCRIPTION_EVENT_CHANGE, si->index);
+                }
+            } else if ((s = pa_namereg_get(u->core, e->device, PA_NAMEREG_SINK))) {
+                pa_log_info("Restoring device for stream %s.", name);
+                pa_sink_input_move_to(si, s, true);
+            }
         }
     }
 
@@ -2592,10 +2822,7 @@ static void apply_entry(struct userdata *u, const char *name, struct entry *e) {
         char *n;
         pa_source *s;
 
-        if (!so->source) /* for eg. moving */
-            continue;
-
-        if (!(n = get_name(so->proplist, "source-output")))
+        if (!(n = pa_proplist_get_stream_group(so->proplist, "source-output", IDENTIFICATION_PROPERTY)))
             continue;
 
         if (!pa_streq(name, n)) {
@@ -2604,12 +2831,38 @@ static void apply_entry(struct userdata *u, const char *name, struct entry *e) {
         }
         pa_xfree(n);
 
-        if (u->restore_device &&
-            e->device_valid &&
-            (s = pa_namereg_get(u->core, e->device, PA_NAMEREG_SOURCE))) {
+        if (u->restore_volume && e->volume_valid && so->volume_writable) {
+            pa_cvolume v;
 
-            pa_log_info("Restoring device for stream %s.", name);
-            pa_source_output_move_to(so, s, true);
+            v = e->volume;
+            pa_log_info("Restoring volume for source output %s.", name);
+            pa_cvolume_remap(&v, &e->channel_map, &so->channel_map);
+            pa_source_output_set_volume(so, &v, true, false);
+        }
+
+        if (u->restore_muted && e->muted_valid) {
+            pa_log_info("Restoring mute state for source output %s.", name);
+            pa_source_output_set_mute(so, e->muted, true);
+        }
+
+        if (u->restore_device) {
+            if (!e->device_valid) {
+                if (so->save_source) {
+                    pa_log_info("Ensuring device is not saved for stream %s.", name);
+                    /* If the device is not valid we should make sure the
+                       save flag is cleared as the user may have specifically
+                       removed the source element from the rule. */
+                    so->save_source = false;
+                    /* This is cheating a bit. The source output itself has not changed
+                       but the rules governing its routing have, so we fire this event
+                       such that other routing modules (e.g. module-device-manager)
+                       will pick up the change and reapply their routing */
+                    pa_subscription_post(so->core, PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT|PA_SUBSCRIPTION_EVENT_CHANGE, so->index);
+                }
+            } else if ((s = pa_namereg_get(u->core, e->device, PA_NAMEREG_SOURCE))) {
+                pa_log_info("Restoring device for stream %s.", name);
+                pa_source_output_move_to(so, s, true);
+            }
         }
     }
 }
@@ -2631,14 +2884,16 @@ PA_GCC_UNUSED static void stream_restore_dump_database(struct userdata *u) {
         name = pa_xstrndup(key.data, key.size);
         pa_datum_free(&key);
 
-        if ((e = read_entry(u, name))) {
+        if ((e = entry_read(u, name))) {
             char t[256];
             pa_log("name=%s", name);
             pa_log("device=%s %s", e->device, pa_yes_no(e->device_valid));
             pa_log("channel_map=%s", pa_channel_map_snprint(t, sizeof(t), &e->channel_map));
-            pa_log("volume=%s %s", pa_cvolume_snprint(t, sizeof(t), &e->volume), pa_yes_no(e->volume_valid));
+            pa_log("volume=%s %s",
+                   pa_cvolume_snprint_verbose(t, sizeof(t), &e->volume, &e->channel_map, true),
+                   pa_yes_no(e->volume_valid));
             pa_log("mute=%s %s", pa_yes_no(e->muted), pa_yes_no(e->volume_valid));
-            pa_xfree(e);
+            entry_free(e);
         }
 
         pa_xfree(name);
@@ -2701,7 +2956,7 @@ static int extension_cb(pa_native_protocol *p, pa_module *m, pa_native_connectio
                 name = pa_xstrndup(key.data, key.size);
                 pa_datum_free(&key);
 
-                if ((e = read_entry(u, name))) {
+                if ((e = entry_read(u, name))) {
                     pa_cvolume r;
                     pa_channel_map cm;
 
@@ -2711,7 +2966,7 @@ static int extension_cb(pa_native_protocol *p, pa_module *m, pa_native_connectio
                     pa_tagstruct_puts(reply, e->device_valid ? e->device : NULL);
                     pa_tagstruct_put_boolean(reply, e->muted_valid ? e->muted : false);
 
-                    pa_xfree(e);
+                    entry_free(e);
                 }
 
                 pa_xfree(name);
@@ -2736,115 +2991,121 @@ static int extension_cb(pa_native_protocol *p, pa_module *m, pa_native_connectio
                 goto fail;
 
             if (mode == PA_UPDATE_SET) {
+#ifdef HAVE_DBUS
                 struct dbus_entry *de;
                 void *state = NULL;
 
                 PA_HASHMAP_FOREACH(de, u->dbus_entries, state) {
                     send_entry_removed_signal(de);
-                    dbus_entry_free(pa_hashmap_remove(u->dbus_entries, de->entry_name));
+                    pa_hashmap_remove_and_free(u->dbus_entries, de->entry_name);
                 }
+#endif
                 pa_database_clear(u->database);
             }
 
             while (!pa_tagstruct_eof(t)) {
                 const char *name, *device;
                 bool muted;
-                struct entry entry;
-                pa_datum key, data;
-                pa_cvolume r;
+                struct entry *entry;
+#ifdef HAVE_DBUS
                 struct entry *old;
+#endif
 
-                pa_zero(entry);
-                entry.version = ENTRY_VERSION;
+                entry = entry_new();
 
                 if (pa_tagstruct_gets(t, &name) < 0 ||
-                    pa_tagstruct_get_channel_map(t, &entry.channel_map) ||
-                    pa_tagstruct_get_cvolume(t, &r) < 0 ||
+                    pa_tagstruct_get_channel_map(t, &entry->channel_map) ||
+                    pa_tagstruct_get_cvolume(t, &entry->volume) < 0 ||
                     pa_tagstruct_gets(t, &device) < 0 ||
-                    pa_tagstruct_get_boolean(t, &muted) < 0)
+                    pa_tagstruct_get_boolean(t, &muted) < 0) {
+                    entry_free(entry);
                     goto fail;
+                }
 
-                entry.volume = r;
-
-                if (!name || !*name)
+                if (!name || !*name) {
+                    entry_free(entry);
                     goto fail;
+                }
 
-                entry.volume_valid = entry.volume.channels > 0;
+                entry->volume_valid = entry->volume.channels > 0;
 
-                if (entry.volume_valid)
-                    if (!pa_cvolume_compatible_with_channel_map(&r, &entry.channel_map))
+                if (entry->volume_valid)
+                    if (!pa_cvolume_compatible_with_channel_map(&entry->volume, &entry->channel_map)) {
+                        entry_free(entry);
                         goto fail;
+                    }
 
-                entry.muted = muted;
-                entry.muted_valid = true;
+                entry->muted = muted;
+                entry->muted_valid = true;
 
-                if (device)
-                    pa_strlcpy(entry.device, device, sizeof(entry.device));
-                entry.device_valid = !!entry.device[0];
+                entry->device = pa_xstrdup(device);
+                entry->device_valid = device && !!entry->device[0];
 
-                if (entry.device_valid &&
-                    !pa_namereg_is_valid_name(entry.device))
+                if (entry->device_valid && !pa_namereg_is_valid_name(entry->device)) {
+                    entry_free(entry);
                     goto fail;
+                }
 
-                old = read_entry(u, name);
-
-                if (entry.volume_valid) {
+                if (entry->volume_valid) {
                     if (u->use_sink_volume)
-                        set_route_volumes(u, &entry.volume);
+                        ext_set_route_volumes(u, &entry->volume);
                     else {
-                        set_route_volume_by_name(u, name, &entry.volume);
-                        _proxy_volume(u, name, &entry.volume);
+                        ext_set_route_volume_by_name(u, name, &entry->volume);
+                        ext_proxy_volume(u, name, &entry->volume);
                     }
                 }
 
-                key.data = (char*) name;
-                key.size = strlen(name);
-
-                data.data = &entry;
-                data.size = sizeof(entry);
+#ifdef HAVE_DBUS
+                old = entry_read(u, name);
+#endif
 
                 pa_log_debug("Client %s changes entry %s.",
                              pa_strnull(pa_proplist_gets(pa_native_connection_get_client(c)->proplist, PA_PROP_APPLICATION_PROCESS_BINARY)),
                              name);
 
-                if (pa_database_set(u->database, &key, &data, mode == PA_UPDATE_REPLACE) == 0) {
+                if (entry_write(u, name, entry, mode == PA_UPDATE_REPLACE)) {
+#ifdef HAVE_DBUS
                     struct dbus_entry *de;
 
                     if (old) {
                         pa_assert_se((de = pa_hashmap_get(u->dbus_entries, name)));
 
-                        if ((old->device_valid != entry.device_valid)
-                            || (entry.device_valid && !pa_streq(entry.device, old->device)))
-                            send_device_updated_signal(de, &entry);
+                        if ((old->device_valid != entry->device_valid)
+                            || (entry->device_valid && !pa_streq(entry->device, old->device)))
+                            send_device_updated_signal(de, entry);
 
-                        if ((old->volume_valid != entry.volume_valid)
-                            || (entry.volume_valid && (!pa_cvolume_equal(&entry.volume, &old->volume)
-                                                       || !pa_channel_map_equal(&entry.channel_map, &old->channel_map))))
-                            send_volume_updated_signal(de, &entry);
+                        if ((old->volume_valid != entry->volume_valid)
+                            || (entry->volume_valid && (!pa_cvolume_equal(&entry->volume, &old->volume)
+                                                       || !pa_channel_map_equal(&entry->channel_map, &old->channel_map))))
+                            send_volume_updated_signal(de, entry);
 
-                        if (!old->muted_valid || (entry.muted != old->muted))
-                            send_mute_updated_signal(de, &entry);
+                        if (!old->muted_valid || (entry->muted != old->muted))
+                            send_mute_updated_signal(de, entry);
 
                     } else {
                         de = dbus_entry_new(u, name);
                         pa_assert_se(pa_hashmap_put(u->dbus_entries, de->entry_name, de) == 0);
                         send_new_entry_signal(de);
                     }
+#endif
 
                     if (u->use_sink_volume) {
-                        _sink_set_volume(u->use_sink_volume->sink, &entry.volume);
+                        ext_sink_set_volume(u->use_sink_volume->sink, &entry->volume);
                     } else {
                         if (apply_immediately)
-                            apply_entry(u, name, &entry);
+                            entry_apply(u, name, entry);
                     }
                 }
 
+#ifdef HAVE_DBUS
                 if (old)
-                    pa_xfree(old);
+                    entry_free(old);
+#endif
+                entry_free(entry);
             }
 
             /* no need to save volumes now if sink_volume-mode is on,
-             * since they are saved later on anyway, in sink_volume_subscribe_cb
+             * since they are saved later on anyway, in ext_sink_volume_subscribe_cb
              */
             if (!u->use_sink_volume)
                 trigger_save(u);
@@ -2857,15 +3118,19 @@ static int extension_cb(pa_native_protocol *p, pa_module *m, pa_native_connectio
             while (!pa_tagstruct_eof(t)) {
                 const char *name;
                 pa_datum key;
+#ifdef HAVE_DBUS
                 struct dbus_entry *de;
+#endif
 
                 if (pa_tagstruct_gets(t, &name) < 0)
                     goto fail;
 
+#ifdef HAVE_DBUS
                 if ((de = pa_hashmap_get(u->dbus_entries, name))) {
                     send_entry_removed_signal(de);
-                    dbus_entry_free(pa_hashmap_remove(u->dbus_entries, name));
+                    pa_hashmap_remove_and_free(u->dbus_entries, name);
                 }
+#endif
 
                 key.data = (char*) name;
                 key.size = strlen(name);
@@ -2917,6 +3182,101 @@ static pa_hook_result_t connection_unlink_hook_cb(pa_native_protocol *p, pa_nati
     return PA_HOOK_OK;
 }
 
+static void clean_up_db(struct userdata *u) {
+    struct clean_up_item {
+        PA_LLIST_FIELDS(struct clean_up_item);
+        char *entry_name;
+        struct entry *entry;
+    };
+
+    PA_LLIST_HEAD(struct clean_up_item, to_be_removed);
+#ifdef ENABLE_LEGACY_DATABASE_ENTRY_FORMAT
+    PA_LLIST_HEAD(struct clean_up_item, to_be_converted);
+#endif
+    bool done = false;
+    pa_datum key;
+    struct clean_up_item *item = NULL;
+    struct clean_up_item *next = NULL;
+
+    pa_assert(u);
+
+    /* It would be convenient to remove or replace the entries in the database
+     * in the same loop that iterates through the database, but modifying the
+     * database is not supported while iterating through it. That's why we
+     * collect the entries that need to be removed or replaced to these
+     * lists. */
+    PA_LLIST_HEAD_INIT(struct clean_up_item, to_be_removed);
+#ifdef ENABLE_LEGACY_DATABASE_ENTRY_FORMAT
+    PA_LLIST_HEAD_INIT(struct clean_up_item, to_be_converted);
+#endif
+
+    done = !pa_database_first(u->database, &key, NULL);
+    while (!done) {
+        pa_datum next_key;
+        char *entry_name = NULL;
+        struct entry *e = NULL;
+
+        entry_name = pa_xstrndup(key.data, key.size);
+
+        /* Use entry_read() to check whether this entry is valid. */
+        if (!(e = entry_read(u, entry_name))) {
+            item = pa_xnew0(struct clean_up_item, 1);
+            PA_LLIST_INIT(struct clean_up_item, item);
+            item->entry_name = entry_name;
+
+#ifdef ENABLE_LEGACY_DATABASE_ENTRY_FORMAT
+            /* entry_read() failed, but what about legacy_entry_read()? */
+            if (!(e = legacy_entry_read(u, entry_name)))
+                /* Not a legacy entry either, let's remove this. */
+                PA_LLIST_PREPEND(struct clean_up_item, to_be_removed, item);
+            else {
+                /* Yay, it's valid after all! Now let's convert the entry to the current format. */
+                item->entry = e;
+                PA_LLIST_PREPEND(struct clean_up_item, to_be_converted, item);
+            }
+#else
+            /* Invalid entry, let's remove this. */
+            PA_LLIST_PREPEND(struct clean_up_item, to_be_removed, item);
+#endif
+        } else {
+            pa_xfree(entry_name);
+            entry_free(e);
+        }
+
+        done = !pa_database_next(u->database, &key, &next_key, NULL);
+        pa_datum_free(&key);
+        key = next_key;
+    }
+
+    PA_LLIST_FOREACH_SAFE(item, next, to_be_removed) {
+        key.data = item->entry_name;
+        key.size = strlen(item->entry_name);
+
+        pa_log_debug("Removing an invalid entry: %s", item->entry_name);
+
+        pa_assert_se(pa_database_unset(u->database, &key) >= 0);
+        trigger_save(u);
+
+        PA_LLIST_REMOVE(struct clean_up_item, to_be_removed, item);
+        pa_xfree(item->entry_name);
+        pa_xfree(item);
+    }
+
+#ifdef ENABLE_LEGACY_DATABASE_ENTRY_FORMAT
+    PA_LLIST_FOREACH_SAFE(item, next, to_be_converted) {
+        pa_log_debug("Upgrading a legacy entry to the current format: %s", item->entry_name);
+
+        pa_assert_se(entry_write(u, item->entry_name, item->entry, true) >= 0);
+        trigger_save(u);
+
+        PA_LLIST_REMOVE(struct clean_up_item, to_be_converted, item);
+        pa_xfree(item->entry_name);
+        entry_free(item->entry);
+        pa_xfree(item);
+    }
+#endif
+}
+
 int pa__init(pa_module*m) {
     pa_modargs *ma = NULL;
     struct userdata *u;
@@ -2924,15 +3284,12 @@ int pa__init(pa_module*m) {
     pa_sink_input *si;
     pa_source_output *so;
     uint32_t idx;
-    bool restore_device = true,
-              restore_volume = true,
-              restore_muted = true,
-              restore_route_volume = true,
-              on_hotplug = true,
-              on_rescue = true,
-              use_voice = false;
+    bool restore_device = true, restore_volume = true, restore_muted = true, on_hotplug = true, on_rescue = true;
+    bool restore_route_volume = true, use_voice = false;
+#ifdef HAVE_DBUS
     pa_datum key;
     bool done;
+#endif
 
     pa_assert(m);
 
@@ -2944,10 +3301,14 @@ int pa__init(pa_module*m) {
     if (pa_modargs_get_value_boolean(ma, "restore_device", &restore_device) < 0 ||
         pa_modargs_get_value_boolean(ma, "restore_volume", &restore_volume) < 0 ||
         pa_modargs_get_value_boolean(ma, "restore_muted", &restore_muted) < 0 ||
-        pa_modargs_get_value_boolean(ma, "restore_route_volume", &restore_route_volume) < 0 ||
         pa_modargs_get_value_boolean(ma, "on_hotplug", &on_hotplug) < 0 ||
         pa_modargs_get_value_boolean(ma, "on_rescue", &on_rescue) < 0) {
-        pa_log("restore_device=, restore_volume=, restore_muted=, restore_route_volume=, on_hotplug= and on_rescue= expect boolean arguments");
+        pa_log("restore_device=, restore_volume=, restore_muted=, on_hotplug= and on_rescue= expect boolean arguments");
+        goto fail;
+    }
+
+    if (pa_modargs_get_value_boolean(ma, "restore_route_volume", &restore_route_volume) < 0) {
+        pa_log("restore_route_volume= expects boolean argument.");
         goto fail;
     }
 
@@ -2971,7 +3332,7 @@ int pa__init(pa_module*m) {
     u->use_voice = use_voice;
 
     u->volume_proxy = pa_volume_proxy_get(u->core);
-    u->volume_proxy_hook_slot = pa_hook_connect(&pa_volume_proxy_hooks(u->volume_proxy)[PA_VOLUME_PROXY_HOOK_CHANGED], PA_HOOK_NORMAL, (pa_hook_cb_t)volume_proxy_cb, u);
+    u->volume_proxy_hook_slot = pa_hook_connect(&pa_volume_proxy_hooks(u->volume_proxy)[PA_VOLUME_PROXY_HOOK_CHANGED], PA_HOOK_NORMAL, (pa_hook_cb_t)ext_volume_proxy_cb, u);
 
     u->subscribed = pa_idxset_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
 
@@ -3000,12 +3361,14 @@ int pa__init(pa_module*m) {
         u->source_unlink_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_UNLINK], PA_HOOK_LATE, (pa_hook_cb_t) source_unlink_hook_callback, u);
     }
 
-    if (restore_volume || restore_muted)
+    if (restore_volume || restore_muted) {
         u->sink_input_fixate_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_FIXATE], PA_HOOK_EARLY, (pa_hook_cb_t) sink_input_fixate_hook_callback, u);
+        u->source_output_fixate_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_FIXATE], PA_HOOK_EARLY, (pa_hook_cb_t) source_output_fixate_hook_callback, u);
+    }
 
     if (u->restore_route_volume && u->use_voice) {
-        u->sink_proplist_changed_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_PROPLIST_CHANGED], PA_HOOK_LATE, (pa_hook_cb_t)sink_proplist_changed_hook_callback, u);
-        u->sink_input_move_finished_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_MOVE_FINISH], PA_HOOK_NORMAL, (pa_hook_cb_t)hw_sink_input_move_finish_callback, u);
+        u->sink_proplist_changed_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_PROPLIST_CHANGED], PA_HOOK_LATE, (pa_hook_cb_t)ext_sink_proplist_changed_hook_callback, u);
+        u->sink_input_move_finished_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_MOVE_FINISH], PA_HOOK_NORMAL, (pa_hook_cb_t)ext_hw_sink_input_move_finish_callback, u);
     }
 
     if (!(fname = pa_state_path("stream-volumes", true)))
@@ -3017,22 +3380,25 @@ int pa__init(pa_module*m) {
         goto fail;
     }
 
-    pa_log_info("Sucessfully opened database file '%s'.", fname);
+    pa_log_info("Successfully opened database file '%s'.", fname);
     pa_xfree(fname);
+
+    clean_up_db(u);
 
     if (fill_db(u, pa_modargs_get_value(ma, "fallback_table", NULL)) < 0)
         goto fail;
 
-    if (fill_route_db(u, pa_modargs_get_value(ma, "route_table", NULL)) < 0) {
+    if (ext_fill_route_db(u, pa_modargs_get_value(ma, "route_table", NULL)) < 0) {
         pa_log_debug("no route table found, route volumes disabled.\n");
     }
 
-    if (fill_sink_db(u, pa_modargs_get_value(ma, "sink_volume_table", NULL))) {
+    if (ext_fill_sink_db(u, pa_modargs_get_value(ma, "sink_volume_table", NULL))) {
         pa_log_debug("no sink volume table found, sink volumes disabled.\n");
     }
 
+#ifdef HAVE_DBUS
     u->dbus_protocol = pa_dbus_protocol_get(u->core);
-    u->dbus_entries = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL, free_dbus_entry_cb);
+    u->dbus_entries = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL, (pa_free_cb_t) dbus_entry_free);
 
     pa_assert_se(pa_dbus_protocol_add_interface(u->dbus_protocol, OBJECT_PATH, &stream_restore_interface_info, u) >= 0);
     pa_assert_se(pa_dbus_protocol_register_extension(u->dbus_protocol, INTERFACE_STREAM_RESTORE) >= 0);
@@ -3043,24 +3409,17 @@ int pa__init(pa_module*m) {
         pa_datum next_key;
         char *name;
         struct dbus_entry *de;
-        struct entry *e;
-
-        done = !pa_database_next(u->database, &key, &next_key, NULL);
 
         name = pa_xstrndup(key.data, key.size);
-        pa_datum_free(&key);
-
-        /* Use read_entry() for checking that the entry is valid. */
-        if ((e = read_entry(u, name))) {
-            de = dbus_entry_new(u, name);
-            pa_assert_se(pa_hashmap_put(u->dbus_entries, de->entry_name, de) == 0);
-            pa_xfree(e);
-        }
-
+        de = dbus_entry_new(u, name);
+        pa_assert_se(pa_hashmap_put(u->dbus_entries, de->entry_name, de) == 0);
         pa_xfree(name);
 
+        done = !pa_database_next(u->database, &key, &next_key, NULL);
+        pa_datum_free(&key);
         key = next_key;
     }
+#endif
 
     if (!(fname = pa_state_path("x-maemo-route-volumes", true)))
         goto fail;
@@ -3085,7 +3444,7 @@ int pa__init(pa_module*m) {
          * databases are filled and in shape. When we request parameter mode updates, parameter module immediately
          * sends us the current audio mode, and we need to have route values to properly forward them again to
          * volume proxy. */
-        meego_parameter_request_updates(NULL, (pa_hook_cb_t) parameters_changed_cb, PA_HOOK_NORMAL, true, u);
+        meego_parameter_request_updates(NULL, (pa_hook_cb_t) ext_parameters_changed_cb, PA_HOOK_NORMAL, true, u);
     }
 
     pa_modargs_free(ma);
@@ -3097,15 +3456,7 @@ fail:
     if (ma)
         pa_modargs_free(ma);
 
-    return  -1;
-}
-
-static void free_dbus_entry_cb(void *p) {
-    struct dbus_entry *de = p;
-
-    pa_assert(de);
-
-    dbus_entry_free(de);
+    return -1;
 }
 
 void pa__done(pa_module*m) {
@@ -3116,6 +3467,7 @@ void pa__done(pa_module*m) {
     if (!(u = m->userdata))
         return;
 
+#ifdef HAVE_DBUS
     if (u->dbus_protocol) {
         pa_assert(u->dbus_entries);
 
@@ -3126,6 +3478,7 @@ void pa__done(pa_module*m) {
 
         pa_dbus_protocol_unref(u->dbus_protocol);
     }
+#endif
 
     if (u->subscription)
         pa_subscription_free(u->subscription);
@@ -3134,7 +3487,7 @@ void pa__done(pa_module*m) {
         pa_subscription_free(u->sink_subscription);
 
     if (!u->use_voice)
-        meego_parameter_stop_updates(NULL, (pa_hook_cb_t) parameters_changed_cb, u);
+        meego_parameter_stop_updates(NULL, (pa_hook_cb_t) ext_parameters_changed_cb, u);
 
     if (u->sink_input_new_hook_slot)
         pa_hook_slot_free(u->sink_input_new_hook_slot);
@@ -3182,9 +3535,9 @@ void pa__done(pa_module*m) {
     if (u->subscribed)
         pa_idxset_free(u->subscribed, NULL);
 
-    _free_route_volumes(u);
+    ext_free_route_volumes(u);
 
-    _free_sink_volumes(u);
+    ext_free_sink_volumes(u);
 
     pa_xfree(u->route);
     pa_xfree(u);
