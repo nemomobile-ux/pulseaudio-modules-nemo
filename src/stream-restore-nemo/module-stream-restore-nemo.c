@@ -239,11 +239,12 @@ static void ext_set_stream(struct userdata *u, const char *name, const pa_volume
 static void ext_set_streams(struct userdata *u, const pa_volume_t volume, const int muted);
 static void ext_proxy_volume(struct userdata *u, const char*name, const pa_cvolume *volume);
 static void ext_proxy_volume_all(struct userdata *u);
-static pa_hook_result_t ext_volume_proxy_cb(pa_volume_proxy *p, const char *name, struct userdata *u);
+static pa_hook_result_t ext_volume_proxy_cb(pa_volume_proxy *p, pa_volume_proxy_entry *e, struct userdata *u);
 static char* ext_route_key(const char *name, const char *route);
 static void ext_free_route_volumes(struct userdata *u);
 static struct ext_route_entry* ext_read_route_entry(struct userdata *u, const char *name, const char *route);
 static bool ext_entry_has_volume_changed(struct entry *a, struct entry *b);
+static void ext_apply_route_volume(struct userdata *u, struct ext_route_volume *r, bool apply);
 static void ext_apply_route_volumes(struct userdata *u, bool apply);
 static void ext_update_volumes(struct userdata *u);
 static void ext_check_mode(const char *mode, struct userdata *u);
@@ -254,6 +255,7 @@ static pa_hook_result_t ext_parameters_changed_cb(pa_core *c, meego_parameter_up
 static void ext_sink_volume_subscribe_cb(pa_core *c, pa_subscription_event_type_t t, uint32_t idx, void *userdata);
 static int ext_fill_route_db(struct userdata *u, const char *filename);
 static int ext_fill_sink_db(struct userdata *u, const char *filename);
+static void ext_route_entry_write(struct userdata *u, struct ext_route_volume *r, const char *route);
 /* route extension functions end */
 
 #ifdef HAVE_DBUS
@@ -783,24 +785,6 @@ static void handle_add_entry(DBusConnection *conn, DBusMessage *msg, void *userd
 
     pa_assert_se(entry_write(u, name, e, true));
 
-    /* FIXME: If the entry was not new, and its volume was updated, and there
-     * is a route volume for the entry, and the new volume wasn't the same for
-     * every channel, then the volume will be applied immediately even if
-     * apply_immediately is false here. That happens because when the new
-     * volume is stored in the volume proxy, it is stored as a mono value only,
-     * and when we get a callback from the proxy due to updating it,
-     * ext_volume_proxy_cb thinks that the volume has been changed, even though it
-     * really isn't (information is lost in the mono transformation).
-     * ext_volume_proxy_cb then applies the new mono volume from the volume proxy
-     * immediately for existing streams also.
-     *
-     * If all channels have the same volume to begin with, this doesn't happen,
-     * because ext_volume_proxy_cb correctly detects that nothing has changed and
-     * nothing needs to be done.
-     *
-     * This can be fixed either by changing the volume proxy to store
-     * multichannel volumes or by changing the route volumes to only store mono
-     * volumes. */
     if (apply_immediately)
         entry_apply(u, name, e);
 
@@ -1263,7 +1247,7 @@ static void ext_proxy_volume(struct userdata *u, const char*name, const pa_cvolu
     pa_assert(volume);
     pa_assert(pa_cvolume_valid(volume));
 
-    pa_volume_proxy_set_volume(u->volume_proxy, name, pa_cvolume_max(volume));
+    pa_volume_proxy_set_volume(u->volume_proxy, name, volume, true);
 }
 
 static void ext_proxy_volume_all(struct userdata *u) {
@@ -1277,40 +1261,27 @@ static void ext_proxy_volume_all(struct userdata *u) {
         ext_proxy_volume(u, r->name, &r->volume);
 }
 
-static pa_hook_result_t ext_volume_proxy_cb(pa_volume_proxy *p, const char *name, struct userdata *u) {
-    pa_volume_t vol;
-    pa_cvolume volume;
+static pa_hook_result_t ext_volume_proxy_cb(pa_volume_proxy *p, pa_volume_proxy_entry *e, struct userdata *u) {
     struct ext_route_volume *r;
-    bool changed = false;
 
-    if (!pa_volume_proxy_get_volume(p, name, &vol))
-        return PA_HOOK_OK;
+    pa_log_debug("ext_volume_proxy_cb() %s", e->name);
 
-    if ((r = ext_get_route_volume_by_name(u, name))) {
-        int i;
-        for (i = 0; i < r->volume.channels; i++) {
-            if (vol != r->volume.values[i]) {
-                pa_cvolume_set(&r->volume, r->volume.channels, vol);
-                changed = true;
-                break;
-            }
+    if ((r = ext_get_route_volume_by_name(u, e->name))) {
+
+        if (!pa_cvolume_equal(&r->volume, &e->volume)) {
+            pa_log_debug("route volume %s modified in changing hook.", e->name);
+            r->volume = e->volume;
         }
-    }
 
-    if (changed) {
         if (u->use_sink_volume) {
-            pa_log_debug("ext_volume_proxy_cb() adjust sink-volume %u", vol);
-
-            pa_cvolume_init(&volume);
-            pa_cvolume_set(&volume, 1, vol);
-
+            pa_log_debug("ext_volume_proxy_cb() adjust sink-volume %u", pa_cvolume_max(&e->volume));
             /* set all route volumes to sink volume */
-            ext_set_route_volumes(u, &volume);
-            ext_sink_set_volume(u->use_sink_volume->sink, &volume);
+            ext_set_route_volumes(u, &e->volume);
+            ext_sink_set_volume(u->use_sink_volume->sink, &e->volume);
             ext_apply_route_volumes(u, false);
             /* trigger_save() is going to be called in ext_sink_volume_subscribe_cb */
         } else {
-            ext_apply_route_volumes(u, true);
+            ext_apply_route_volume(u, r, true);
             trigger_save(u);
         }
     }
@@ -1399,54 +1370,61 @@ static bool ext_entry_has_volume_changed(struct entry *a, struct entry *b) {
         return b->volume_valid;
 }
 
+static void ext_apply_route_volume(struct userdata *u, struct ext_route_volume *r, bool apply) {
+    struct entry *old;
+    pa_datum key, data;
+    struct entry *entry = NULL;
+    struct dbus_entry *de = NULL;
+
+    pa_assert(u);
+    pa_assert(r);
+
+    if ((old = entry_read(u, r->name))) {
+        entry = entry_copy(old);
+    } else {
+        /* If there is a route volume specified for a non-existent restore
+         * entry, the route volume is ignored. */
+        pa_log("route volume for non-existent entry %s, ignoring.", r->name);
+        return;
+    }
+
+    pa_cvolume_set(&entry->volume, entry->volume.channels, r->volume.values[0]);
+    entry->volume_valid = true;
+
+    if (!ext_entry_has_volume_changed(old, entry)) {
+        entry_free(old);
+        entry_free(entry);
+        return;
+    }
+    entry_free(old);
+
+    key.data = (void*) r->name;
+    key.size = (int)strlen(r->name);
+
+    data.data = (void*) entry;
+    data.size = sizeof(struct entry);
+
+    pa_log_info("Updating route %s volume/mute/device for stream %s.", u->route, r->name);
+    entry_write(u, r->name, entry, true);
+
+    pa_assert_se(de = pa_hashmap_get(u->dbus_entries, r->name));
+    send_volume_updated_signal(de, entry);
+
+    if (apply)
+        entry_apply(u, r->name, entry);
+
+    entry_free(entry);
+}
+
 /* Iterate through all route volumes and apply their value to corresponding streams
  * in s-r database */
 static void ext_apply_route_volumes(struct userdata *u, bool apply) {
-
-    struct entry *old;
-    pa_datum key, data;
     struct ext_route_volume *r;
 
     pa_assert(u);
 
-    for (r = u->route_volumes; r; r = r->next) {
-        struct entry *entry = NULL;
-        struct dbus_entry *de = NULL;
-
-        if ((old = entry_read(u, r->name)))
-            entry = entry_copy(old);
-        else
-            /* If there is a route volume specified for a non-existent restore
-             * entry, the route volume is ignored. */
-            continue;
-
-        pa_cvolume_set(&entry->volume, entry->volume.channels, r->volume.values[0]);
-        entry->volume_valid = true;
-
-        if (!ext_entry_has_volume_changed(old, entry)) {
-            entry_free(old);
-            entry_free(entry);
-            continue;
-        }
-        entry_free(old);
-
-        key.data = (void*) r->name;
-        key.size = (int)strlen(r->name);
-
-        data.data = (void*) entry;
-        data.size = sizeof(struct entry);
-
-        pa_log_info("Updating route %s volume/mute/device for stream %s.", u->route, r->name);
-        entry_write(u, r->name, entry, true);
-
-        pa_assert_se(de = pa_hashmap_get(u->dbus_entries, r->name));
-        send_volume_updated_signal(de, entry);
-
-        if (apply)
-            entry_apply(u, r->name, entry);
-
-        entry_free(entry);
-    }
+    for (r = u->route_volumes; r; r = r->next)
+        ext_apply_route_volume(u, r, apply);
 }
 
 static void ext_update_volumes(struct userdata *u) {
@@ -1455,6 +1433,9 @@ static void ext_update_volumes(struct userdata *u) {
     char t[256];
 
     pa_assert(u);
+    pa_assert(u->route);
+
+    pa_log_debug("ext_update_volumes() update volumes for route %s", u->route);
 
     if ((u->use_sink_volume = ext_have_sink_volume(u, u->route)) != NULL) {
         pa_log_debug("Using sink-volume for mode %s.", u->route);
@@ -1484,7 +1465,6 @@ static void ext_update_volumes(struct userdata *u) {
                                                             pa_cvolume_snprint(t, sizeof(t), &r->volume));
             ext_sink_set_volume(u->use_sink_volume->sink, &r->volume);
             ext_apply_route_volumes(u, false);
-            trigger_save(u);
 
             ext_proxy_volume_all(u);
         }
@@ -1522,20 +1502,22 @@ static void ext_update_volumes(struct userdata *u) {
                 r->volume = r->default_volume;
             } else {
 
-                if (r->reset_min_volume && e->volume.values[0] < r->min_volume.values[0])
+                if (r->reset_min_volume && e->volume.values[0] < r->min_volume.values[0]) {
                     r->volume = r->default_volume;
-                else
+                } else {
                     r->volume = e->volume;
+                }
             }
             pa_xfree(e);
         }
-        ext_proxy_volume(u, r->name, &r->volume);
 
         pa_log_debug("Restored stream %s route %s volume=%s", r->name, u->route, pa_cvolume_snprint(t, sizeof(t), &r->volume));
     }
 
-    ext_apply_route_volumes(u, true);
-    trigger_save(u);
+    /* Don't apply the volume yet. We do the applying
+     * in ext_volume_proxy_cb() when we know the actual
+     * volume to apply. */
+    ext_proxy_volume_all(u);
 
     return;
 }
@@ -1799,6 +1781,40 @@ finish:
         pa_xfree(fn);
 
     return ret;
+}
+
+static void ext_route_entry_write(struct userdata *u, struct ext_route_volume *r, const char *route) {
+    struct ext_route_entry entry;
+    pa_datum key, data;
+    char *route_key;
+    char t[256];
+
+    pa_assert(u);
+    pa_assert(r);
+    pa_assert(route);
+
+    if (!pa_cvolume_valid(&r->volume)) {
+        pa_log("volume not valid for %s", r->name);
+        return;
+    }
+
+    route_key = ext_route_key(r->name, route);
+
+    memset(&entry, 0, sizeof(entry));
+    entry.version = EXT_ROUTE_ENTRY_VERSION;
+    entry.volume = r->volume;
+
+    key.data = (void*) route_key;
+    key.size = (int) strlen(route_key);
+
+    data.data = (void*) &entry;
+    data.size = (int) sizeof(entry);
+
+    pa_database_set(u->route_database, &key, &data, true);
+
+    pa_log_debug("Save stream %s route %s volume=%s", u->route, r->name, pa_cvolume_snprint(t, sizeof(t), &r->volume));
+
+    pa_xfree(route_key);
 }
 
 /* route extension functions end */
@@ -2074,33 +2090,8 @@ static void trigger_save(struct userdata *u) {
     if (!u->route)
         goto end;
 
-    for (r = u->route_volumes; r; r = r->next) {
-        struct ext_route_entry entry;
-        pa_datum key, data;
-        char *route_key;
-        char t[256];
-
-        if (!pa_cvolume_valid(&r->volume))
-            continue;
-
-        route_key = ext_route_key(r->name, u->route);
-
-        memset(&entry, 0, sizeof(entry));
-        entry.version = EXT_ROUTE_ENTRY_VERSION;
-        entry.volume = r->volume;
-
-        key.data = (void*) route_key;
-        key.size = (int) strlen(route_key);
-
-        data.data = (void*) &entry;
-        data.size = sizeof(entry);
-
-        pa_database_set(u->route_database, &key, &data, true);
-
-        pa_log_debug("Save stream %s route %s volume=%s", u->route, r->name, pa_cvolume_snprint(t, sizeof(t), &r->volume));
-
-        pa_xfree(route_key);
-    }
+    for (r = u->route_volumes; r; r = r->next)
+        ext_route_entry_write(u, r, u->route);
 
 end:
     if (u->save_time_event)
@@ -2150,6 +2141,8 @@ static void subscribe_callback(pa_core *c, pa_subscription_event_type_t t, uint3
 #ifdef HAVE_DBUS
     struct dbus_entry *de = NULL;
 #endif
+
+    struct ext_route_volume *r = NULL;
 
     pa_assert(c);
     pa_assert(u);
@@ -2274,14 +2267,15 @@ static void subscribe_callback(pa_core *c, pa_subscription_event_type_t t, uint3
         entry_free(old);
     }
 
-    if (entry->volume_valid) {
-        ext_set_route_volume_by_name(u, name, &entry->volume);
-    }
-
     pa_log_info("Storing volume/mute/device for stream %s.", name);
 
-    if (entry_write(u, name, entry, true))
-        trigger_save(u);
+    if ((r = ext_get_route_volume_by_name(u, name))) {
+        if (entry->volume_valid)
+            ext_set_route_volume(r, &entry->volume);
+    } else {
+        if (entry_write(u, name, entry, true))
+            trigger_save(u);
+    }
 
 #ifdef HAVE_DBUS
     if (created_new_entry) {
@@ -2300,7 +2294,7 @@ static void subscribe_callback(pa_core *c, pa_subscription_event_type_t t, uint3
     }
 #endif
 
-    if (entry->volume_valid)
+    if (r && entry->volume_valid)
         ext_proxy_volume(u, name, &entry->volume);
 
     entry_free(entry);
@@ -3332,7 +3326,7 @@ int pa__init(pa_module*m) {
     u->use_voice = use_voice;
 
     u->volume_proxy = pa_volume_proxy_get(u->core);
-    u->volume_proxy_hook_slot = pa_hook_connect(&pa_volume_proxy_hooks(u->volume_proxy)[PA_VOLUME_PROXY_HOOK_CHANGED], PA_HOOK_NORMAL, (pa_hook_cb_t)ext_volume_proxy_cb, u);
+    u->volume_proxy_hook_slot = pa_hook_connect(&pa_volume_proxy_hooks(u->volume_proxy)[PA_VOLUME_PROXY_HOOK_CHANGED], PA_HOOK_NORMAL, (pa_hook_cb_t) ext_volume_proxy_cb, u);
 
     u->subscribed = pa_idxset_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
 
