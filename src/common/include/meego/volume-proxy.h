@@ -35,10 +35,17 @@
 #include <pulse/volume.h>
 
 typedef struct pa_volume_proxy pa_volume_proxy;
+typedef struct pa_volume_proxy_entry pa_volume_proxy_entry;
+
+struct pa_volume_proxy_entry {
+    const char *name;
+    pa_cvolume volume;
+};
 
 /* Hook data: pa_volume_proxy pointer. */
 typedef enum pa_volume_proxy_hook {
-    PA_VOLUME_PROXY_HOOK_CHANGED, /* Call data: const char* stream_name */
+    PA_VOLUME_PROXY_HOOK_CHANGING,  /* Call data: pa_volume_proxy_entry */
+    PA_VOLUME_PROXY_HOOK_CHANGED,   /* Call data: pa_volume_proxy_entry */
     PA_VOLUME_PROXY_HOOK_MAX
 } pa_volume_proxy_hook_t;
 
@@ -46,12 +53,19 @@ pa_volume_proxy *pa_volume_proxy_get(pa_core *core);
 pa_volume_proxy *pa_volume_proxy_ref(pa_volume_proxy *r);
 void pa_volume_proxy_unref(pa_volume_proxy *r);
 
-void pa_volume_proxy_set_volume(pa_volume_proxy *r, const char *name, pa_volume_t volume);
+/* If allow_update is true after the volume has been
+ * set PA_VOLUME_PROXY_HOOK_CHANGING is called and it
+ * is possible to alter the volume during the hook. */
+void pa_volume_proxy_set_volume(pa_volume_proxy *r,
+                                const char *name,
+                                const pa_cvolume *volume,
+                                bool allow_update);
 
 /* return true if volume was found from proxy database,
- * otherwise return false. The value of volume is returned
- * in return_volume. */
-bool pa_volume_proxy_get_volume(pa_volume_proxy *r, const char *name, pa_volume_t *return_volume);
+ * otherwise return false. The value of volume is set to
+ * return_volume, and return_volume pointer needs to point
+ * to valid pa_cvolume struct. */
+bool pa_volume_proxy_get_volume(pa_volume_proxy *r, const char *name, pa_cvolume *return_volume);
 
 pa_hook *pa_volume_proxy_hooks(pa_volume_proxy *r);
 
