@@ -58,17 +58,25 @@ bool mv_set_step(struct mv_userdata *u, unsigned step) {
     if (s->current_step != step) {
         pa_log_debug("set current step to %d", step);
         s->current_step = step;
-
-        if (u->call_active) {
-            pa_volume_proxy_set_volume(u->volume_proxy, CALL_STREAM, s->step[s->current_step]);
-        } else {
-            pa_volume_proxy_set_volume(u->volume_proxy, MEDIA_STREAM, s->step[s->current_step]);
-        }
-
         changed = true;
     }
 
     return changed;
+}
+
+pa_volume_t mv_step_value(struct mv_volume_steps *s, unsigned step) {
+    pa_assert(s);
+
+    return s->step[step];
+}
+
+pa_volume_t mv_current_step_value(struct mv_userdata *u) {
+    struct mv_volume_steps *s;
+
+    pa_assert(u);
+
+    s = mv_active_steps(u);
+    return mv_step_value(s, s->current_step);
 }
 
 /* otherwise basic binary search except that exact value is not checked,
@@ -100,30 +108,6 @@ int mv_search_step(int *steps, int n_steps, int vol) {
         sel = n_steps - 1;
 
     return sel;
-}
-
-bool mv_update_step(struct mv_userdata *u) {
-    pa_volume_t vol;
-    bool success = true;
-    int step;
-
-    pa_assert(u);
-    pa_assert(u->current_steps);
-
-    if (pa_volume_proxy_get_volume(u->volume_proxy, CALL_STREAM, &vol)) {
-        step = mv_search_step(u->current_steps->call.step, u->current_steps->call.n_steps, vol);
-        u->current_steps->call.current_step = step;
-    } else
-        success = false;
-
-
-    if (pa_volume_proxy_get_volume(u->volume_proxy, MEDIA_STREAM, &vol)) {
-        step = mv_search_step(u->current_steps->media.step, u->current_steps->media.n_steps, vol);
-        u->current_steps->media.current_step = step;
-    } else
-        success = false;
-
-    return success;
 }
 
 void mv_normalize_steps(struct mv_volume_steps *steps) {

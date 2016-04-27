@@ -138,15 +138,16 @@ struct mv_volume_steps* mv_active_steps(struct mv_userdata *u);
  */
 bool mv_set_step(struct mv_userdata *u, unsigned step);
 
+/* get value of step from steps. */
+pa_volume_t mv_step_value(struct mv_volume_steps *s, unsigned step);
+
+/* get value of step from currently active steps. */
+pa_volume_t mv_current_step_value(struct mv_userdata *u);
+
 /* search for step with volume vol.
  * returns found step or -1 if not found
  */
 int mv_search_step(int *steps, int n_steps, int vol);
-
-/* update step based on information in volume proxy.
- * returns true if update was successfull.
- */
-bool mv_update_step(struct mv_userdata *u);
 
 /* normalize mdB values to linear values */
 void mv_normalize_steps(struct mv_volume_steps *steps);
