@@ -164,9 +164,6 @@ bool mv_parse_steps(struct mv_userdata *u,
 /* Return highest step safe for listening with headphones. */
 uint32_t mv_safe_step(struct mv_userdata *u);
 
-/* Return true if current media step is same or over high volume step. */
-bool mv_high_volume(struct mv_userdata *u);
-
 /* Return true if currently active media steps have high volume step defined. */
 bool mv_has_high_volume(struct mv_userdata *u);
 

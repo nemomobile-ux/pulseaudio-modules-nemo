@@ -278,20 +278,6 @@ uint32_t mv_safe_step(struct mv_userdata *u) {
     return u->current_steps->high_volume_step - 1;
 }
 
-bool mv_high_volume(struct mv_userdata *u) {
-    pa_assert(u);
-
-    if (u->call_active)
-        return false;
-
-    if (u->current_steps
-        && u->current_steps->has_high_volume_step
-        && u->current_steps->media.current_step >= u->current_steps->high_volume_step)
-        return true;
-    else
-        return false;
-}
-
 bool mv_has_high_volume(struct mv_userdata *u) {
     pa_assert(u);
 
