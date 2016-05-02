@@ -35,6 +35,15 @@
 
 #include "mainvolume.h"
 
+void mv_volume_steps_set_free(struct mv_volume_steps_set *set) {
+    pa_assert(set);
+
+    pa_xfree(set->route);
+    pa_xfree(set->call.step);
+    pa_xfree(set->media.step);
+    pa_xfree(set);
+}
+
 struct mv_volume_steps* mv_active_steps(struct mv_userdata *u) {
     pa_assert(u);
     pa_assert(u->current_steps);
@@ -221,9 +230,7 @@ bool mv_parse_steps(struct mv_userdata *u,
                     const char *step_string_call,
                     const char *step_string_media,
                     const char *high_volume) {
-    struct mv_volume_steps_set *set;
-    struct mv_volume_steps call_steps;
-    struct mv_volume_steps media_steps;
+    struct mv_volume_steps_set *set = NULL;
     int32_t call_steps_mB[MAX_STEPS];
     int32_t media_steps_mB[MAX_STEPS];
     uint32_t call_steps_count;
@@ -234,27 +241,28 @@ bool mv_parse_steps(struct mv_userdata *u,
     pa_assert(route);
 
     if (!step_string_call || !step_string_media) {
-        return false;
+        goto fail;
     }
+
+    set = pa_xnew0(struct mv_volume_steps_set, 1);
 
     call_steps_count = parse_single_steps(call_steps_mB, step_string_call);
     if (call_steps_count < 1) {
         pa_log_warn("failed to parse call steps; %s", step_string_call);
-        return false;
+        goto fail;
     }
-    normalize_steps(&call_steps, call_steps_mB, call_steps_count);
+    set->call.step = pa_xmalloc(sizeof(pa_volume_t) * call_steps_count);
+    normalize_steps(&set->call, call_steps_mB, call_steps_count);
 
     media_steps_count = parse_single_steps(media_steps_mB, step_string_media);
     if (media_steps_count < 1) {
         pa_log_warn("failed to parse media steps; %s", step_string_media);
-        return false;
+        goto fail;
     }
-    normalize_steps(&media_steps, media_steps_mB, media_steps_count);
+    set->media.step = pa_xmalloc(sizeof(pa_volume_t) * media_steps_count);
+    normalize_steps(&set->media, media_steps_mB, media_steps_count);
 
-    set = pa_xnew0(struct mv_volume_steps_set, 1);
     set->route = pa_xstrdup(route);
-    set->call = call_steps;
-    set->media = media_steps;
     set->first = true;
 
     pa_log_debug("adding %d call and %d media steps with route %s",
@@ -267,6 +275,12 @@ bool mv_parse_steps(struct mv_userdata *u,
     pa_hashmap_put(u->steps, set->route, set);
 
     return true;
+
+fail:
+    if (set)
+        mv_volume_steps_set_free(set);
+
+    return false;
 }
 
 uint32_t mv_safe_step(struct mv_userdata *u) {

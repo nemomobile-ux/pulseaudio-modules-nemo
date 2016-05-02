@@ -51,7 +51,7 @@ typedef enum media_state {
 } media_state_t;
 
 struct mv_volume_steps {
-    pa_volume_t step[MAX_STEPS];
+    pa_volume_t *step;
     uint32_t n_steps;
     uint32_t current_step;
 };
@@ -126,6 +126,8 @@ struct mv_userdata {
         media_state_t media_state;          /* Media state combined from active streams and policy state. */
     } notifier;
 };
+
+void mv_volume_steps_set_free(struct mv_volume_steps_set *set);
 
 /* return either "media" or "call" volume steps struct based on whether
  * call is currently active */

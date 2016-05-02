@@ -84,13 +84,6 @@ static void check_notifier(struct mv_userdata *u);
 
 static void signal_steps(struct mv_userdata *u);
 
-static void steps_set_free(struct mv_volume_steps_set *s) {
-    pa_assert(s);
-
-    pa_xfree(s->route);
-    pa_xfree(s);
-}
-
 static void signal_timer_stop(struct mv_userdata *u) {
     if (u->signal_time_event) {
         u->core->mainloop->time_free(u->signal_time_event);
@@ -317,7 +310,9 @@ static struct mv_volume_steps_set* fallback_new(const char *route, const int cal
 
     fallback = pa_xnew0(struct mv_volume_steps_set, 1);
     fallback->call.n_steps = call_steps;
+    fallback->call.step = pa_xmalloc(sizeof(pa_volume_t) * call_steps);
     fallback->media.n_steps = media_steps;
+    fallback->media.step = pa_xmalloc(sizeof(pa_volume_t) * media_steps);
     fallback->has_high_volume_step = false;
 
     /* calculate call/media_steps linearly using PA_VOLUME_NORM
@@ -353,7 +348,7 @@ static pa_hook_result_t parameters_changed_cb(pa_core *c, meego_parameter_update
      * normally */
     if (u->tuning_mode && ua->parameters) {
         if ((set = pa_hashmap_remove(u->steps, u->route))) {
-            steps_set_free(set);
+            mv_volume_steps_set_free(set);
             set = NULL;
         }
     }
@@ -758,7 +753,7 @@ int pa__init(pa_module *m) {
     u->module = m;
 
     u->steps = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func,
-                                   NULL, (pa_free_cb_t) steps_set_free);
+                                   NULL, (pa_free_cb_t) mv_volume_steps_set_free);
 
     fallback = fallback_new("fallback", 10, 20);
     pa_hashmap_put(u->steps, fallback->route, fallback);
