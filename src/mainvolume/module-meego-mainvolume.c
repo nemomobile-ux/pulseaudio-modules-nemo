@@ -318,7 +318,7 @@ static struct mv_volume_steps_set* fallback_new(const char *route, const int cal
     fallback = pa_xnew0(struct mv_volume_steps_set, 1);
     fallback->call.n_steps = call_steps;
     fallback->media.n_steps = media_steps;
-    fallback->high_volume_step = -1;
+    fallback->has_high_volume_step = false;
 
     /* calculate call/media_steps linearly using PA_VOLUME_NORM
      * as max value, starting from 0 volume. */
@@ -337,7 +337,7 @@ static struct mv_volume_steps_set* fallback_new(const char *route, const int cal
 static pa_hook_result_t parameters_changed_cb(pa_core *c, meego_parameter_update_args *ua, struct mv_userdata *u) {
     struct mv_volume_steps_set *set;
     pa_proplist *p = NULL;
-    int ret = 0;
+    bool ret = false;
 
     pa_assert(ua);
     pa_assert(u);
@@ -376,7 +376,7 @@ static pa_hook_result_t parameters_changed_cb(pa_core *c, meego_parameter_update
                                  pa_proplist_gets(p, PROP_MEDIA_STEPS),
                                  pa_proplist_gets(p, PROP_HIGH_VOLUME));
 
-        if (ret > 0) {
+        if (ret) {
             u->current_steps = pa_hashmap_get(u->steps, u->route);
         } else {
             pa_log_info("failed to update steps for %s, using fallback.", u->route);
@@ -387,7 +387,7 @@ static pa_hook_result_t parameters_changed_cb(pa_core *c, meego_parameter_update
     if (p)
         pa_proplist_free(p);
 
-    pa_log_debug("mode changes to %s (%d media steps, %d call steps)",
+    pa_log_debug("mode changes to %s (%u media steps, %u call steps)",
                  u->route, u->current_steps->media.n_steps, u->current_steps->call.n_steps);
 
     /* Check if new route is in notifier watch list */
@@ -423,7 +423,7 @@ static pa_hook_result_t volume_changing_cb(pa_volume_proxy *r,
                                            pa_volume_proxy_entry *e,
                                            struct mv_userdata *u) {
     struct mv_volume_steps *steps;
-    int new_step;
+    uint32_t new_step;
     bool call_steps;
 
     pa_assert(u);
@@ -438,7 +438,7 @@ static pa_hook_result_t volume_changing_cb(pa_volume_proxy *r,
         new_step = mv_search_step(steps->step, steps->n_steps, pa_cvolume_avg(&e->volume));
 
         if (new_step > mv_safe_step(u)) {
-            pa_log_info("high volume after module load, requested %d, we will reset to safe step %d", new_step, mv_safe_step(u));
+            pa_log_info("high volume after module load, requested %u, we will reset to safe step %u", new_step, mv_safe_step(u));
             pa_cvolume_set(&e->volume, e->volume.channels, mv_step_value(steps, mv_safe_step(u)));
         }
         u->current_steps->first = false;
@@ -451,7 +451,7 @@ static pa_hook_result_t volume_changed_cb(pa_volume_proxy *r,
                                           pa_volume_proxy_entry *e,
                                           struct mv_userdata *u) {
     struct mv_volume_steps *steps;
-    int new_step;
+    uint32_t new_step;
     bool call_steps;
 
     pa_assert(u);
@@ -462,7 +462,7 @@ static pa_hook_result_t volume_changed_cb(pa_volume_proxy *r,
     new_step = mv_search_step(steps->step, steps->n_steps, pa_cvolume_avg(&e->volume));
 
     if (new_step != steps->current_step) {
-        pa_log_debug("volume changed for stream %s, vol %d (step %d)", e->name,
+        pa_log_debug("volume changed for stream %s, vol %u (step %u)", e->name,
                                                                        pa_cvolume_avg(&e->volume),
                                                                        new_step);
 

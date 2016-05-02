@@ -64,7 +64,7 @@ bool mv_set_step(struct mv_userdata *u, unsigned step) {
     return changed;
 }
 
-pa_volume_t mv_step_value(struct mv_volume_steps *s, unsigned step) {
+pa_volume_t mv_step_value(struct mv_volume_steps *s, uint32_t step) {
     pa_assert(s);
 
     return s->step[step];
@@ -81,14 +81,14 @@ pa_volume_t mv_current_step_value(struct mv_userdata *u) {
 
 /* otherwise basic binary search except that exact value is not checked,
  * so that we can search by volume range.
- * returns found step or -1 if not found
+ * returns found step
  */
-int mv_search_step(int *steps, int n_steps, int vol) {
-    int sel = 0;
+uint32_t mv_search_step(pa_volume_t *steps, uint32_t n_steps, pa_volume_t vol) {
+    uint32_t sel = 0;
 
-    int low = 0;
-    int high = n_steps;
-    int mid;
+    uint32_t low = 0;
+    uint32_t high = n_steps;
+    uint32_t mid;
 
     while (low < high) {
         mid = low + ((high-low)/2);
@@ -110,15 +110,18 @@ int mv_search_step(int *steps, int n_steps, int vol) {
     return sel;
 }
 
-void mv_normalize_steps(struct mv_volume_steps *steps) {
-    unsigned i = 0;
+static void normalize_steps(struct mv_volume_steps *steps, int32_t *steps_mB, uint32_t count) {
+    uint32_t i = 0;
 
     pa_assert(steps);
-    pa_assert(steps->n_steps > 0);
+    pa_assert(count > 0);
+
+    steps->n_steps = count;
+    steps->current_step = 0;
 
     /* if first step is less than equal to -20000 mB (PA_DECIBEL_MININFTY if
      * INFINITY is not defined), set it directly to PA_VOLUME_MUTED */
-    if (steps->step[0] <= -20000) {
+    if (steps_mB[0] <= -20000) {
         steps->step[0] = PA_VOLUME_MUTED;
         i = 1;
     }
@@ -126,17 +129,17 @@ void mv_normalize_steps(struct mv_volume_steps *steps) {
     /* convert mB step values to software volume values.
      * divide mB values by 100.0 to get dB */
     for (; i < steps->n_steps; i++) {
-        double value = (double)steps->step[i];
+        double value = (double) steps_mB[i];
         steps->step[i] = pa_sw_volume_from_dB(value / 100.0);
     }
 }
 
-int mv_parse_single_steps(struct mv_volume_steps *steps, const char *step_string) {
-    int len;
-    int count = 0;
-    int i = 0;
+static uint32_t parse_single_steps(int32_t *steps_mB, const char *step_string) {
+    uint32_t len;
+    uint32_t count = 0;
+    uint32_t i = 0;
 
-    pa_assert(steps);
+    pa_assert(steps_mB);
     if (!step_string)
         return 0;
 
@@ -152,7 +155,7 @@ int mv_parse_single_steps(struct mv_volume_steps *steps, const char *step_string
 
         /* invalid syntax in step string, bail out */
         if (i == len)
-            return -1;
+            return 0;
 
         /* increment i by one to get to the start of value */
         i++;
@@ -163,109 +166,116 @@ int mv_parse_single_steps(struct mv_volume_steps *steps, const char *step_string
         value_len = i - start;
 
         if (value_len < 1 || value_len > sizeof(step)-1)
-            return -1;
+            return 0;
 
         /* copy value string part to step string and convert to integer */
         memcpy(step, &step_string[start], value_len);
         step[value_len] = '\0';
 
         if (pa_atoi(step, &value)) {
-            return -1;
+            return 0;
         }
-        steps->step[count] = value;
+        steps_mB[count] = value;
 
         count++;
     }
 
-    steps->n_steps = count;
-    steps->current_step = 0;
-
     return count;
 }
 
-static int parse_high_volume_step(struct mv_volume_steps_set *set, const char *high_volume) {
+static bool parse_high_volume_step(struct mv_volume_steps_set *set, const char *high_volume,
+                                   bool *has_high_volume, uint32_t *high_volume_step) {
     int step;
 
     pa_assert(set);
 
+    *has_high_volume = false;
+    *high_volume_step = 0;
+
     if (!high_volume)
-        return -1;
+        return false;
 
     if (pa_atoi(high_volume, &step)) {
         pa_log_warn("Failed to parse high volume step \"%s\"", high_volume);
-        return -1;
+        return false;
     }
 
-    if (step > set->media.n_steps - 1) {
+    if (step < 1) {
+        pa_log_warn("Minimum high volume step is 1.");
+        return false;
+    }
+
+    if ((uint32_t) step > set->media.n_steps - 1) {
         pa_log_warn("High volume step %d over bounds (max value %u", step, set->media.n_steps - 1);
-        return -1;
+        return false;
     }
 
-    return step;
+    *has_high_volume = true;
+    *high_volume_step = (uint32_t) step;
+
+    return true;
 }
 
-int mv_parse_steps(struct mv_userdata *u,
-                   const char *route,
-                   const char *step_string_call,
-                   const char *step_string_media,
-                   const char *high_volume) {
-    int count1 = 0;
-    int count2 = 0;
+bool mv_parse_steps(struct mv_userdata *u,
+                    const char *route,
+                    const char *step_string_call,
+                    const char *step_string_media,
+                    const char *high_volume) {
     struct mv_volume_steps_set *set;
     struct mv_volume_steps call_steps;
     struct mv_volume_steps media_steps;
+    int32_t call_steps_mB[MAX_STEPS];
+    int32_t media_steps_mB[MAX_STEPS];
+    uint32_t call_steps_count;
+    uint32_t media_steps_count;
 
     pa_assert(u);
     pa_assert(u->steps);
     pa_assert(route);
 
     if (!step_string_call || !step_string_media) {
-        return 0;
+        return false;
     }
 
-    count1 = mv_parse_single_steps(&call_steps, step_string_call);
-    if (count1 < 1) {
+    call_steps_count = parse_single_steps(call_steps_mB, step_string_call);
+    if (call_steps_count < 1) {
         pa_log_warn("failed to parse call steps; %s", step_string_call);
-        return -1;
+        return false;
     }
-    mv_normalize_steps(&call_steps);
+    normalize_steps(&call_steps, call_steps_mB, call_steps_count);
 
-    count2 = mv_parse_single_steps(&media_steps, step_string_media);
-    if (count2 < 1) {
+    media_steps_count = parse_single_steps(media_steps_mB, step_string_media);
+    if (media_steps_count < 1) {
         pa_log_warn("failed to parse media steps; %s", step_string_media);
-        return -1;
+        return false;
     }
-    mv_normalize_steps(&media_steps);
+    normalize_steps(&media_steps, media_steps_mB, media_steps_count);
 
     set = pa_xnew0(struct mv_volume_steps_set, 1);
     set->route = pa_xstrdup(route);
     set->call = call_steps;
     set->media = media_steps;
-    set->high_volume_step = parse_high_volume_step(set, high_volume);
     set->first = true;
 
     pa_log_debug("adding %d call and %d media steps with route %s",
                  set->call.n_steps,
                  set->media.n_steps,
                  set->route);
-    if (set->high_volume_step > -1)
+    if (parse_high_volume_step(set, high_volume, &set->has_high_volume_step, &set->high_volume_step))
         pa_log_debug("setting media high volume step %d", set->high_volume_step);
 
     pa_hashmap_put(u->steps, set->route, set);
 
-    return count1 + count2;
+    return true;
 }
 
-int mv_safe_step(struct mv_userdata *u) {
+uint32_t mv_safe_step(struct mv_userdata *u) {
     pa_assert(u);
+    pa_assert(!u->call_active);
+    pa_assert(u->current_steps);
+    pa_assert(u->current_steps->has_high_volume_step);
 
-    if (u->call_active)
-        return -1;
-
-    if (u->current_steps)
-        return u->current_steps->high_volume_step - 1;
-
-    return -1;
+    return u->current_steps->high_volume_step - 1;
 }
 
 bool mv_high_volume(struct mv_userdata *u) {
@@ -275,7 +285,7 @@ bool mv_high_volume(struct mv_userdata *u) {
         return false;
 
     if (u->current_steps
-        && u->current_steps->high_volume_step > -1
+        && u->current_steps->has_high_volume_step
         && u->current_steps->media.current_step >= u->current_steps->high_volume_step)
         return true;
     else
@@ -288,7 +298,7 @@ bool mv_has_high_volume(struct mv_userdata *u) {
     if (u->call_active || !u->notifier.mode_active)
         return false;
 
-    if (u->current_steps && u->current_steps->high_volume_step > -1)
+    if (u->current_steps && u->current_steps->has_high_volume_step)
         return true;
     else
         return false;
