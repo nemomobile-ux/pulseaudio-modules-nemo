@@ -92,9 +92,6 @@ struct mv_userdata {
 
     pa_hook_slot *sink_proplist_changed_slot;
 
-    bool mode_change_ready;
-    bool volume_change_ready;
-
     pa_time_event *signal_time_event;
     pa_usec_t last_signal_timestamp;
     pa_usec_t last_step_set_timestamp;

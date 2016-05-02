@@ -82,7 +82,7 @@ static void check_notifier(struct mv_userdata *u);
  * sending change signal. */
 #define SIGNAL_WAIT_TIME ((pa_usec_t)(0.5 * PA_USEC_PER_SEC))
 
-static void signal_steps(struct mv_userdata *u, bool wait_for_mode_change);
+static void signal_steps(struct mv_userdata *u);
 
 static void steps_set_free(struct mv_volume_steps_set *s) {
     pa_assert(s);
@@ -109,7 +109,7 @@ static void signal_time_callback(pa_mainloop_api *a, pa_time_event *e, const str
     signal_timer_stop(u);
 
     /* try signalling current steps again */
-    signal_steps(u, false);
+    signal_steps(u);
 }
 
 static void signal_timer_set(struct mv_userdata *u, const pa_usec_t time) {
@@ -134,30 +134,10 @@ static void check_and_signal_high_volume(struct mv_userdata *u) {
         dbus_signal_high_volume(u, 0);
 }
 
-static void signal_steps(struct mv_userdata *u, bool wait_for_mode_change) {
+static void signal_steps(struct mv_userdata *u) {
     pa_usec_t now;
 
     now = pa_rtclock_now();
-
-    /* If we are in the middle of a mode change, complete mode change consists of two
-     * callbacks, first is for getting the name of the new mode and step tunings for it,
-     * and second is for getting the volume from stream-restore in that mode. To avoid signalling
-     * twice (with wrong step value as the first signal), we have booleans for volume change
-     * and mode change. If for some reason only other one is updated (for example volume
-     * is changed from stream-restore, then stream-restore forwards that to us), we'll signal
-     * our new step SIGNAL_INTERVAL late, but hopefully that's acceptable. (That scenario shouldn't
-     * happen that often.) */
-
-    /* always signal current steps during mode change */
-    if (wait_for_mode_change) {
-        if (u->volume_change_ready && u->mode_change_ready) {
-            signal_timer_stop(u);
-            dbus_signal_steps(u);
-        } else
-            signal_timer_set(u, now + SIGNAL_WAIT_TIME);
-
-        return;
-    }
 
     /* if we haven't sent ack signal for a long time, send initial reply
      * immediately */
@@ -268,7 +248,7 @@ static pa_hook_result_t call_state_cb(pa_core *c, const char *key, struct mv_use
     else
         destroy_virtual_stream(u);
 
-    signal_steps(u, false);
+    signal_steps(u);
 
     if (u->notifier.watchdog)
         check_notifier(u);
@@ -407,7 +387,6 @@ static pa_hook_result_t parameters_changed_cb(pa_core *c, meego_parameter_update
     if (p)
         pa_proplist_free(p);
 
-    u->mode_change_ready = true;
     pa_log_debug("mode changes to %s (%d media steps, %d call steps)",
                  u->route, u->current_steps->media.n_steps, u->current_steps->call.n_steps);
 
@@ -493,7 +472,7 @@ static pa_hook_result_t volume_changed_cb(pa_volume_proxy *r,
     /* if the changed route volume was for currently active steps (phone / x-maemo)
      * then signal steps forward. */
     if (call_steps == u->call_active)
-        signal_steps(u, false);
+        signal_steps(u);
 
     return PA_HOOK_OK;
 }
@@ -1086,8 +1065,6 @@ void dbus_signal_steps(struct mv_userdata *u) {
     pa_dbus_protocol_send_signal(u->dbus_protocol, signal);
     dbus_message_unref(signal);
 
-    u->volume_change_ready = false;
-    u->mode_change_ready = false;
     u->last_signal_timestamp = pa_rtclock_now();
 }
 
@@ -1199,7 +1176,7 @@ void mainvolume_set_current_step(DBusConnection *conn, DBusMessage *msg, DBusMes
     pa_dbus_send_empty_reply(conn, msg);
 
     u->last_step_set_timestamp = pa_rtclock_now();
-    signal_steps(u, false);
+    signal_steps(u);
 }
 
 void mainvolume_get_high_volume_step(DBusConnection *conn, DBusMessage *msg, void *_u) {
