@@ -35,6 +35,8 @@
 
 #include "volume-proxy.h"
 
+#define VOLUME_PROXY_SHARED_NAME "volume-proxy-1"
+
 struct pa_volume_proxy {
     PA_REFCNT_DECLARE;
 
@@ -45,7 +47,7 @@ struct pa_volume_proxy {
 
 struct volume_entry {
     char *name;
-    pa_volume_t volume;
+    pa_volume_proxy_entry data;
 };
 
 static void volume_entry_free(struct volume_entry *e);
@@ -67,7 +69,7 @@ static pa_volume_proxy* volume_proxy_new(pa_core *c) {
     for (h = 0; h < PA_VOLUME_PROXY_HOOK_MAX; h++)
         pa_hook_init(&r->hooks[h], r);
 
-    pa_assert_se(pa_shared_set(c, "volume-proxy", r) >= 0);
+    pa_assert_se(pa_shared_set(c, VOLUME_PROXY_SHARED_NAME, r) >= 0);
 
     return r;
 }
@@ -75,7 +77,7 @@ static pa_volume_proxy* volume_proxy_new(pa_core *c) {
 pa_volume_proxy *pa_volume_proxy_get(pa_core *core) {
     pa_volume_proxy *r;
 
-    if ((r = pa_shared_get(core, "volume-proxy")))
+    if ((r = pa_shared_get(core, VOLUME_PROXY_SHARED_NAME)))
         return pa_volume_proxy_ref(r);
 
     return volume_proxy_new(core);
@@ -110,14 +112,14 @@ void pa_volume_proxy_unref(pa_volume_proxy *r) {
     for (h = 0; h < PA_VOLUME_PROXY_HOOK_MAX; h++)
         pa_hook_done(&r->hooks[h]);
 
-    pa_assert_se(pa_shared_remove(r->core, "volume-proxy") >= 0);
+    pa_assert_se(pa_shared_remove(r->core, VOLUME_PROXY_SHARED_NAME) >= 0);
 
     pa_hashmap_free(r->volumes);
 
     pa_xfree(r);
 }
 
-bool pa_volume_proxy_get_volume(pa_volume_proxy *r, const char *name, pa_volume_t *return_volume) {
+bool pa_volume_proxy_get_volume(pa_volume_proxy *r, const char *name, pa_cvolume *return_volume) {
     struct volume_entry *e;
 
     pa_assert(r);
@@ -125,32 +127,51 @@ bool pa_volume_proxy_get_volume(pa_volume_proxy *r, const char *name, pa_volume_
     pa_assert(return_volume);
 
     if ((e = pa_hashmap_get(r->volumes, name))) {
-        *return_volume = e->volume;
+        *return_volume = e->data.volume;
         return true;
     }
 
     return false;
 }
 
-void pa_volume_proxy_set_volume(pa_volume_proxy *r, const char *name, pa_volume_t volume) {
+void pa_volume_proxy_set_volume(pa_volume_proxy *r,
+                                const char *name,
+                                const pa_cvolume *volume,
+                                bool allow_update) {
     struct volume_entry *e;
-    bool changed;
+    bool changed = false;
+    pa_cvolume vol;
 
     pa_assert(r);
+    pa_assert(name);
+    pa_assert(volume);
     pa_assert(PA_REFCNT_VALUE(r) >= 1);
+
+    vol = *volume;
 
     if (!(e = pa_hashmap_get(r->volumes, name))) {
         e = pa_xnew0(struct volume_entry, 1);
         e->name = pa_xstrdup(name);
+        e->data.name = e->name;
+        e->data.volume = vol;
         pa_hashmap_put(r->volumes, e->name, e);
         changed = true;
-    } else
-        changed = e->volume != volume;
+    }
 
-    e->volume = volume;
+    if (allow_update) {
+        pa_cvolume old = e->data.volume;
+        e->data.volume = vol;
+        pa_hook_fire(&r->hooks[PA_VOLUME_PROXY_HOOK_CHANGING], (void *) &e->data);
+        changed = changed || !pa_cvolume_equal(&e->data.volume, &old);
+    }
+
+    changed = changed || !pa_cvolume_equal(&e->data.volume, &vol);
+
+    if (!allow_update)
+        e->data.volume = vol;
 
     if (changed)
-        pa_hook_fire(&r->hooks[PA_VOLUME_PROXY_HOOK_CHANGED], (void *) e->name);
+        pa_hook_fire(&r->hooks[PA_VOLUME_PROXY_HOOK_CHANGED], (void *) &e->data);
 }
 
 pa_hook *pa_volume_proxy_hooks(pa_volume_proxy *r) {

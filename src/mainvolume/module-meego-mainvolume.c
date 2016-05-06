@@ -82,14 +82,7 @@ static void check_notifier(struct mv_userdata *u);
  * sending change signal. */
 #define SIGNAL_WAIT_TIME ((pa_usec_t)(0.5 * PA_USEC_PER_SEC))
 
-static void signal_steps(struct mv_userdata *u, bool wait_for_mode_change);
-
-static void steps_set_free(struct mv_volume_steps_set *s) {
-    pa_assert(s);
-
-    pa_xfree(s->route);
-    pa_xfree(s);
-}
+static void signal_steps(struct mv_userdata *u);
 
 static void signal_timer_stop(struct mv_userdata *u) {
     if (u->signal_time_event) {
@@ -109,7 +102,7 @@ static void signal_time_callback(pa_mainloop_api *a, pa_time_event *e, const str
     signal_timer_stop(u);
 
     /* try signalling current steps again */
-    signal_steps(u, false);
+    signal_steps(u);
 }
 
 static void signal_timer_set(struct mv_userdata *u, const pa_usec_t time) {
@@ -134,30 +127,10 @@ static void check_and_signal_high_volume(struct mv_userdata *u) {
         dbus_signal_high_volume(u, 0);
 }
 
-static void signal_steps(struct mv_userdata *u, bool wait_for_mode_change) {
+static void signal_steps(struct mv_userdata *u) {
     pa_usec_t now;
 
     now = pa_rtclock_now();
-
-    /* If we are in the middle of a mode change, complete mode change consists of two
-     * callbacks, first is for getting the name of the new mode and step tunings for it,
-     * and second is for getting the volume from stream-restore in that mode. To avoid signalling
-     * twice (with wrong step value as the first signal), we have booleans for volume change
-     * and mode change. If for some reason only other one is updated (for example volume
-     * is changed from stream-restore, then stream-restore forwards that to us), we'll signal
-     * our new step SIGNAL_INTERVAL late, but hopefully that's acceptable. (That scenario shouldn't
-     * happen that often.) */
-
-    /* always signal current steps during mode change */
-    if (wait_for_mode_change) {
-        if (u->volume_change_ready && u->mode_change_ready) {
-            signal_timer_stop(u);
-            dbus_signal_steps(u);
-        } else
-            signal_timer_set(u, now + SIGNAL_WAIT_TIME);
-
-        return;
-    }
 
     /* if we haven't sent ack signal for a long time, send initial reply
      * immediately */
@@ -268,7 +241,7 @@ static pa_hook_result_t call_state_cb(pa_core *c, const char *key, struct mv_use
     else
         destroy_virtual_stream(u);
 
-    signal_steps(u, false);
+    signal_steps(u);
 
     if (u->notifier.watchdog)
         check_notifier(u);
@@ -337,8 +310,10 @@ static struct mv_volume_steps_set* fallback_new(const char *route, const int cal
 
     fallback = pa_xnew0(struct mv_volume_steps_set, 1);
     fallback->call.n_steps = call_steps;
+    fallback->call.step = pa_xmalloc(sizeof(pa_volume_t) * call_steps);
     fallback->media.n_steps = media_steps;
-    fallback->high_volume_step = -1;
+    fallback->media.step = pa_xmalloc(sizeof(pa_volume_t) * media_steps);
+    fallback->has_high_volume_step = false;
 
     /* calculate call/media_steps linearly using PA_VOLUME_NORM
      * as max value, starting from 0 volume. */
@@ -357,7 +332,7 @@ static struct mv_volume_steps_set* fallback_new(const char *route, const int cal
 static pa_hook_result_t parameters_changed_cb(pa_core *c, meego_parameter_update_args *ua, struct mv_userdata *u) {
     struct mv_volume_steps_set *set;
     pa_proplist *p = NULL;
-    int ret = 0;
+    bool ret = false;
 
     pa_assert(ua);
     pa_assert(u);
@@ -373,7 +348,7 @@ static pa_hook_result_t parameters_changed_cb(pa_core *c, meego_parameter_update
      * normally */
     if (u->tuning_mode && ua->parameters) {
         if ((set = pa_hashmap_remove(u->steps, u->route))) {
-            steps_set_free(set);
+            mv_volume_steps_set_free(set);
             set = NULL;
         }
     }
@@ -396,7 +371,7 @@ static pa_hook_result_t parameters_changed_cb(pa_core *c, meego_parameter_update
                                  pa_proplist_gets(p, PROP_MEDIA_STEPS),
                                  pa_proplist_gets(p, PROP_HIGH_VOLUME));
 
-        if (ret > 0) {
+        if (ret) {
             u->current_steps = pa_hashmap_get(u->steps, u->route);
         } else {
             pa_log_info("failed to update steps for %s, using fallback.", u->route);
@@ -407,13 +382,8 @@ static pa_hook_result_t parameters_changed_cb(pa_core *c, meego_parameter_update
     if (p)
         pa_proplist_free(p);
 
-    /* update steps for this route */
-    mv_update_step(u);
-    pa_log_debug("mode changes to %s (media step %d, call step %d)",
-                 u->route, u->current_steps->media.current_step, u->current_steps->call.current_step);
-
-    u->mode_change_ready = true;
-    signal_steps(u, true);
+    pa_log_debug("mode changes to %s (%u media steps, %u call steps)",
+                 u->route, u->current_steps->media.n_steps, u->current_steps->call.n_steps);
 
     /* Check if new route is in notifier watch list */
     if (u->notifier.watchdog) {
@@ -428,57 +398,76 @@ static pa_hook_result_t parameters_changed_cb(pa_core *c, meego_parameter_update
     return PA_HOOK_OK;
 }
 
-static pa_hook_result_t volume_changed_cb(pa_volume_proxy *r, const char *name, struct mv_userdata *u) {
-    pa_volume_t vol;
+static bool step_and_call_values(struct mv_userdata *u,
+                                 const char *name,
+                                 struct mv_volume_steps **steps,
+                                 bool *call_steps) {
+    if (pa_streq(name, CALL_STREAM)) {
+        *steps = &u->current_steps->call;
+        *call_steps = true;
+        return true;
+    } else if (pa_streq(name, MEDIA_STREAM)) {
+        *steps = &u->current_steps->media;
+        *call_steps = false;
+        return true;
+    } else
+        return false;
+}
+
+static pa_hook_result_t volume_changing_cb(pa_volume_proxy *r,
+                                           pa_volume_proxy_entry *e,
+                                           struct mv_userdata *u) {
     struct mv_volume_steps *steps;
-    int new_step;
+    uint32_t new_step;
     bool call_steps;
-    bool changed = false;
 
     pa_assert(u);
 
-    if (!pa_volume_proxy_get_volume(r, name, &vol))
+    if (!step_and_call_values(u, e->name, &steps, &call_steps))
         return PA_HOOK_OK;
-
-    if (pa_streq(name, CALL_STREAM)) {
-        steps = &u->current_steps->call;
-        call_steps = true;
-    } else if (pa_streq(name, MEDIA_STREAM)) {
-        steps = &u->current_steps->media;
-        call_steps = false;
-    } else {
-        return PA_HOOK_OK;
-    }
-
-    new_step = mv_search_step(steps->step, steps->n_steps, vol);
-
-    if (new_step != steps->current_step) {
-        pa_log_debug("volume changed for stream %s, vol %d (step %d)", name, vol, new_step);
-
-        steps->current_step = new_step;
-        changed = true;
-    }
 
     /* Check only once per module load / parsed step set
      * if volume is higher than safe step. If so, reset to
      * safe step. */
-    if (!call_steps && u->current_steps->first) {
-        if (mv_high_volume(u)) {
-            pa_log_info("high volume after module load, requested %d, we will reset to safe step %d", new_step, mv_safe_step(u));
-            mv_set_step(u, mv_safe_step(u));
-            changed = true;
-        }
+    if (!call_steps && u->current_steps->first && mv_has_high_volume(u)) {
+        new_step = mv_search_step(steps->step, steps->n_steps, pa_cvolume_avg(&e->volume));
 
+        if (new_step > mv_safe_step(u)) {
+            pa_log_info("high volume after module load, requested %u, we will reset to safe step %u", new_step, mv_safe_step(u));
+            pa_cvolume_set(&e->volume, e->volume.channels, mv_step_value(steps, mv_safe_step(u)));
+        }
         u->current_steps->first = false;
     }
 
-    if (changed) {
-        /* signal changed step forward */
-        if (call_steps == u->call_active) {
-            u->volume_change_ready = true;
-            signal_steps(u, true);
-        }
+    return PA_HOOK_OK;
+}
+
+static pa_hook_result_t volume_changed_cb(pa_volume_proxy *r,
+                                          pa_volume_proxy_entry *e,
+                                          struct mv_userdata *u) {
+    struct mv_volume_steps *steps;
+    uint32_t new_step;
+    bool call_steps;
+
+    pa_assert(u);
+
+    if (!step_and_call_values(u, e->name, &steps, &call_steps))
+        return PA_HOOK_OK;
+
+    new_step = mv_search_step(steps->step, steps->n_steps, pa_cvolume_avg(&e->volume));
+
+    if (new_step != steps->current_step) {
+        pa_log_debug("volume changed for stream %s, vol %u (step %u)", e->name,
+                                                                       pa_cvolume_avg(&e->volume),
+                                                                       new_step);
+
+        steps->current_step = new_step;
     }
+
+    /* if the changed route volume was for currently active steps (phone / x-maemo)
+     * then signal steps forward. */
+    if (call_steps == u->call_active)
+        signal_steps(u);
 
     return PA_HOOK_OK;
 }
@@ -764,7 +753,7 @@ int pa__init(pa_module *m) {
     u->module = m;
 
     u->steps = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func,
-                                   NULL, (pa_free_cb_t) steps_set_free);
+                                   NULL, (pa_free_cb_t) mv_volume_steps_set_free);
 
     fallback = fallback_new("fallback", 10, 20);
     pa_hashmap_put(u->steps, fallback->route, fallback);
@@ -791,14 +780,18 @@ int pa__init(pa_module *m) {
     u->media_state_hook_slot = pa_shared_data_connect(u->shared, PA_NEMO_PROP_MEDIA_STATE, (pa_hook_cb_t) media_state_cb, u);
 
     u->volume_proxy = pa_volume_proxy_get(u->core);
+    u->volume_proxy_slot = pa_hook_connect(&pa_volume_proxy_hooks(u->volume_proxy)[PA_VOLUME_PROXY_HOOK_CHANGING],
+                                           PA_HOOK_NORMAL,
+                                           (pa_hook_cb_t) volume_changing_cb,
+                                           u);
     u->volume_proxy_slot = pa_hook_connect(&pa_volume_proxy_hooks(u->volume_proxy)[PA_VOLUME_PROXY_HOOK_CHANGED],
                                            PA_HOOK_NORMAL,
-                                           (pa_hook_cb_t)volume_changed_cb,
+                                           (pa_hook_cb_t) volume_changed_cb,
                                            u);
 
     dbus_init(u);
 
-    meego_parameter_request_updates("mainvolume", (pa_hook_cb_t)parameters_changed_cb, PA_HOOK_NORMAL, true, u);
+    meego_parameter_request_updates("mainvolume", (pa_hook_cb_t) parameters_changed_cb, PA_HOOK_EARLY, true, u);
 
     pa_modargs_free(ma);
 
@@ -1055,6 +1048,8 @@ void dbus_signal_steps(struct mv_userdata *u) {
     step_count = steps->n_steps;
     current_step = steps->current_step;
 
+    pa_log_debug("signal active step %u", current_step);
+
     pa_assert_se((signal = dbus_message_new_signal(MAINVOLUME_PATH,
                                                    MAINVOLUME_IFACE,
                                                    mainvolume_signals[MAINVOLUME_SIGNAL_STEPS_UPDATED].name)));
@@ -1065,8 +1060,6 @@ void dbus_signal_steps(struct mv_userdata *u) {
     pa_dbus_protocol_send_signal(u->dbus_protocol, signal);
     dbus_message_unref(signal);
 
-    u->volume_change_ready = false;
-    u->mode_change_ready = false;
     u->last_signal_timestamp = pa_rtclock_now();
 }
 
@@ -1148,6 +1141,8 @@ void mainvolume_get_current_step(DBusConnection *conn, DBusMessage *msg, void *_
 void mainvolume_set_current_step(DBusConnection *conn, DBusMessage *msg, DBusMessageIter *iter, void *_u) {
     struct mv_userdata *u = (struct mv_userdata*)_u;
     struct mv_volume_steps *steps;
+    const char *stream;
+    pa_cvolume vol;
     uint32_t set_step;
 
     pa_assert(conn);
@@ -1166,12 +1161,17 @@ void mainvolume_set_current_step(DBusConnection *conn, DBusMessage *msg, DBusMes
         return;
     }
 
-    mv_set_step(u, set_step);
+    if (mv_set_step(u, set_step)) {
+        stream = u->call_active ? CALL_STREAM : MEDIA_STREAM;
+        pa_volume_proxy_get_volume(u->volume_proxy, stream, &vol);
+        pa_cvolume_set(&vol, vol.channels, mv_current_step_value(u));
+        pa_volume_proxy_set_volume(u->volume_proxy, stream, &vol, false);
+    }
 
     pa_dbus_send_empty_reply(conn, msg);
 
     u->last_step_set_timestamp = pa_rtclock_now();
-    signal_steps(u, false);
+    signal_steps(u);
 }
 
 void mainvolume_get_high_volume_step(DBusConnection *conn, DBusMessage *msg, void *_u) {

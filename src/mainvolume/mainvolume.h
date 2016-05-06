@@ -51,9 +51,9 @@ typedef enum media_state {
 } media_state_t;
 
 struct mv_volume_steps {
-    int step[MAX_STEPS];
-    unsigned n_steps;
-    unsigned current_step;
+    pa_volume_t *step;
+    uint32_t n_steps;
+    uint32_t current_step;
 };
 
 struct mv_volume_steps_set {
@@ -61,7 +61,8 @@ struct mv_volume_steps_set {
 
     struct mv_volume_steps call;
     struct mv_volume_steps media;
-    int high_volume_step;
+    bool has_high_volume_step;
+    uint32_t high_volume_step;
     /* when parsing volume steps first is set true,
      * and if entering a route with volume higher than high_volume_step,
      * volume is reset to safe volume.
@@ -91,9 +92,6 @@ struct mv_userdata {
     pa_hook_slot *volume_proxy_slot;
 
     pa_hook_slot *sink_proplist_changed_slot;
-
-    bool mode_change_ready;
-    bool volume_change_ready;
 
     pa_time_event *signal_time_event;
     pa_usec_t last_signal_timestamp;
@@ -129,6 +127,8 @@ struct mv_userdata {
     } notifier;
 };
 
+void mv_volume_steps_set_free(struct mv_volume_steps_set *set);
+
 /* return either "media" or "call" volume steps struct based on whether
  * call is currently active */
 struct mv_volume_steps* mv_active_steps(struct mv_userdata *u);
@@ -136,42 +136,35 @@ struct mv_volume_steps* mv_active_steps(struct mv_userdata *u);
 /* set new step as current step.
  * returns true if new step differs from current step.
  */
-bool mv_set_step(struct mv_userdata *u, unsigned step);
+bool mv_set_step(struct mv_userdata *u, uint32_t step);
+
+/* get value of step from steps. */
+pa_volume_t mv_step_value(struct mv_volume_steps *s, uint32_t step);
+
+/* get value of step from currently active steps. */
+pa_volume_t mv_current_step_value(struct mv_userdata *u);
 
 /* search for step with volume vol.
- * returns found step or -1 if not found
+ * returns found step
  */
-int mv_search_step(int *steps, int n_steps, int vol);
-
-/* update step based on information in volume proxy.
- * returns true if update was successfull.
- */
-bool mv_update_step(struct mv_userdata *u);
+uint32_t mv_search_step(pa_volume_t *steps, uint32_t n_steps, pa_volume_t vol);
 
 /* normalize mdB values to linear values */
 void mv_normalize_steps(struct mv_volume_steps *steps);
 
-/* parse step values to steps from step_string.
- * return number of steps found, or -1 on error
- */
-int mv_parse_single_steps(struct mv_volume_steps *steps, const char *step_string);
-
 /* parse step values for route from step_string_call and step_string_media.
  * after successfull parsing of both strings, new filled struct mv_volume_steps_set is
  * added to hashmap with route as key.
- * return total steps parsed or -1 on error.
+ * return true if parsing of both media and call steps was successful.
  */
-int mv_parse_steps(struct mv_userdata *u,
-                   const char *route,
-                   const char *step_string_call,
-                   const char *step_string_media,
-                   const char *high_volume); /* high_volume can be NULL */
+bool mv_parse_steps(struct mv_userdata *u,
+                    const char *route,
+                    const char *step_string_call,
+                    const char *step_string_media,
+                    const char *high_volume); /* high_volume can be NULL */
 
 /* Return highest step safe for listening with headphones. */
-int mv_safe_step(struct mv_userdata *u);
-
-/* Return true if current media step is same or over high volume step. */
-bool mv_high_volume(struct mv_userdata *u);
+uint32_t mv_safe_step(struct mv_userdata *u);
 
 /* Return true if currently active media steps have high volume step defined. */
 bool mv_has_high_volume(struct mv_userdata *u);

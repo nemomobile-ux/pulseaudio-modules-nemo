@@ -123,6 +123,9 @@ mv_listening_watchdog* mv_listening_watchdog_new(pa_core *core,
     wd->timeout = timeout * PA_USEC_PER_SEC * 60;
     wd->initial_notify = true;
 
+    if (wd->counter > wd->timeout)
+        wd->counter = 0;
+
 end:
     pa_xfree(fname);
     return wd;

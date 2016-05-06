@@ -818,8 +818,6 @@ int switch_mode(struct userdata *u, const char *mode) {
 
     u->mode = pa_xstrdup(mode);
 
-    mode_update(u);
-
     pa_log_debug("Checking mode: %s", mode);
 
     PA_LLIST_FOREACH(e, m->algorithm_enablers) {
@@ -864,6 +862,8 @@ int switch_mode(struct userdata *u, const char *mode) {
 
         a->fired = false;
     }
+
+    mode_update(u);
 
     return 0;
 }
