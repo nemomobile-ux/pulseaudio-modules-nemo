@@ -1726,7 +1726,8 @@ static int ext_fill_sink_db(struct userdata *u, const char *filename) {
         f = pa_open_config_file(DEFAULT_SINK_VOLUME_FILE, DEFAULT_SINK_VOLUME_FILE_USER, NULL, &fn);
 
     if (!f) {
-        pa_log_warn("Failed to open sink-volume-table file: %s", pa_cstrerror(errno));
+        if (filename)
+            pa_log("Failed to open sink-volume-table file: %s", pa_cstrerror(errno));
         goto finish;
     }
 
