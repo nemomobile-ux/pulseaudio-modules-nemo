@@ -163,12 +163,12 @@ int pa_shared_data_set_boolean(pa_shared_data *t, const char *key, bool value) {
     if (item->type == SHARED_ITEM_NONE)
         changed = true;
 
-    if (item->type == SHARED_ITEM_BOOL && value != !!PA_UINT_TO_PTR(value))
+    if (item->type == SHARED_ITEM_BOOL && value != !!PA_PTR_TO_UINT(item->value))
         changed = true;
 
     item->type = SHARED_ITEM_BOOL;
     item->value = PA_UINT_TO_PTR(value);
-    item->nbytes = 1;
+    item->nbytes = sizeof(void*);
 
     if (changed) {
         pa_log_debug("Shared item '%s' changes to bool value %s", item->key, value ? "true" : "false");
