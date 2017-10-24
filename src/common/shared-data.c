@@ -115,10 +115,10 @@ void pa_shared_data_unref(pa_shared_data *t) {
     pa_xfree(t);
 }
 
-static shared_item *item_get(pa_core *c, pa_hashmap *items, const char *key) {
+static shared_item *item_get(pa_shared_data *t, pa_hashmap *items, const char *key) {
     shared_item *item;
 
-    pa_assert(c);
+    pa_assert(t);
     pa_assert(items);
     pa_assert(key);
 
@@ -128,7 +128,7 @@ static shared_item *item_get(pa_core *c, pa_hashmap *items, const char *key) {
         item = pa_xnew0(shared_item, 1);
         item->key = pa_xstrdup(key);
         pa_hashmap_put(items, item->key, item);
-        pa_hook_init(&item->changed_hook, c);
+        pa_hook_init(&item->changed_hook, t);
     }
 
     return item;
@@ -137,7 +137,7 @@ static shared_item *item_get(pa_core *c, pa_hashmap *items, const char *key) {
 #define GETI(t, key)    \
     pa_assert(t);       \
     pa_assert(key);     \
-    pa_assert_se((item = item_get(t->core, t->items, key)));
+    pa_assert_se((item = item_get(t, t->items, key)));
 
 
 pa_hook_slot *pa_shared_data_connect(pa_shared_data *t, const char *key, pa_hook_cb_t callback, void *userdata) {
