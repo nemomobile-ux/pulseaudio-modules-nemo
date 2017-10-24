@@ -88,6 +88,13 @@ struct mv_userdata {
     pa_hook_slot *media_state_hook_slot;
     bool call_active;
 
+    bool mute_routing;
+    bool mute_routing_active;
+    pa_hook_slot *volume_sync_hook_slot;
+    int32_t prev_state;
+    pa_time_event *volume_unmute_time_event;
+    uint32_t volume_sync_delay_ms;
+
     pa_volume_proxy *volume_proxy;
     pa_hook_slot *volume_proxy_slot;
 

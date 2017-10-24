@@ -47,18 +47,23 @@
 #include "meego/proplist-nemo.h"
 #include "meego/shared-data.h"
 #include "meego/volume-proxy.h"
+#include "sailfishos/defines.h"
 
 PA_MODULE_AUTHOR("Juho Hämäläinen");
 PA_MODULE_DESCRIPTION("Nokia mainvolume module");
 PA_MODULE_USAGE("tuning_mode=<true/false> defaults to false "
                 "virtual_stream=<true/false> create virtual stream for voice call volume control (default false) "
-                "listening_time_notifier_conf=<file location for listening time notifier configuration>");
+                "listening_time_notifier_conf=<file location for listening time notifier configuration> "
+                "mute_routing=<true/false> apply muting to media streams when volumes are out of sync (default true) "
+                "unmute_delay=<time in ms> time to keep media streams muted after volumes are in sync (default 50)");
 PA_MODULE_VERSION(PACKAGE_VERSION);
 
 static const char* const valid_modargs[] = {
     "tuning_mode",
     "virtual_stream",
     "listening_time_notifier_conf",
+    "mute_routing",
+    "unmute_delay",
     NULL,
 };
 
@@ -81,6 +86,9 @@ static void check_notifier(struct mv_userdata *u);
 /* If multiple step change calls are coming in succession, wait SIGNAL_WAIT_TIME before
  * sending change signal. */
 #define SIGNAL_WAIT_TIME ((pa_usec_t)(0.5 * PA_USEC_PER_SEC))
+
+#define DEFAULT_MUTE_ROUTING (true)
+#define DEFAULT_VOLUME_SYNC_DELAY_MS (50)
 
 static void signal_steps(struct mv_userdata *u);
 
@@ -295,6 +303,119 @@ static pa_hook_result_t media_state_cb(pa_core *c, const char *key, struct mv_us
     return PA_HOOK_OK;
 }
 
+static void volume_sync_add_mute(struct mv_userdata *u, pa_sink_input *si) {
+    const char *role;
+    pa_cvolume mute;
+
+    pa_assert(u);
+    pa_assert(si);
+
+    if (!(role = pa_proplist_gets(si->proplist, PA_PROP_MEDIA_ROLE)))
+        return;
+
+    if (pa_streq(role, "x-maemo") || pa_streq(role, "media")) {
+        pa_cvolume_set(&mute, si->soft_volume.channels, 0);
+        pa_log_debug("add mute to sink-input %s", pa_proplist_gets(si->proplist, PA_PROP_MEDIA_NAME));
+        pa_sink_input_add_volume_factor(si, "mw-mute-when-moving", &mute);
+    }
+}
+
+static void volume_sync_remove_mute(struct mv_userdata *u, pa_sink_input *si) {
+    const char *role;
+
+    pa_assert(u);
+    pa_assert(si);
+
+    if (!(role = pa_proplist_gets(si->proplist, PA_PROP_MEDIA_ROLE)))
+        return;
+
+    if (pa_streq(role, "x-maemo") || pa_streq(role, "media")) {
+        pa_log_debug("remove mute from sink-input %s", pa_proplist_gets(si->proplist, PA_PROP_MEDIA_NAME));
+        pa_sink_input_remove_volume_factor(si, "mw-mute-when-moving");
+    }
+}
+
+static void volume_sync_remove_mute_all(struct mv_userdata *u) {
+    pa_sink_input *si;
+    uint32_t idx;
+
+    pa_assert(u);
+
+    PA_IDXSET_FOREACH(si, u->core->sink_inputs, idx)
+        volume_sync_remove_mute(u, si);
+    pa_log_debug("volumes in sync");
+}
+
+static void volume_sync_delayed_unmute_stop(struct mv_userdata *u) {
+    pa_assert(u);
+
+    if (u->volume_unmute_time_event) {
+        u->core->mainloop->time_free(u->volume_unmute_time_event);
+        u->volume_unmute_time_event = NULL;
+    }
+}
+
+static void volume_sync_delayed_unmute_cb(pa_mainloop_api *a, pa_time_event *e, const struct timeval *t, void *userdata) {
+    struct mv_userdata *u = (struct mv_userdata*)userdata;
+
+    pa_assert(a);
+    pa_assert(e);
+    pa_assert(u);
+    pa_assert(e == u->volume_unmute_time_event);
+
+    volume_sync_delayed_unmute_stop(u);
+    volume_sync_remove_mute_all(u);
+    u->mute_routing_active = false;
+}
+
+static void volume_sync_delayed_unmute_set(struct mv_userdata *u) {
+    pa_usec_t time;
+
+    pa_assert(u);
+
+    time = pa_rtclock_now() + u->volume_sync_delay_ms * PA_USEC_PER_MSEC;
+
+    pa_log_debug("volume sync unmute streams in %u ms", u->volume_sync_delay_ms);
+    if (u->volume_unmute_time_event)
+        pa_core_rttime_restart(u->core, u->volume_unmute_time_event, time);
+    else
+        u->volume_unmute_time_event = pa_core_rttime_new(u->core, time, volume_sync_delayed_unmute_cb, u);
+}
+
+static pa_hook_result_t volume_sync_cb(pa_core *c, const char *key, struct mv_userdata *u) {
+    pa_sink_input *si;
+    uint32_t idx;
+    int32_t state;
+
+    if (pa_shared_data_get_integer(u->shared, key, &state) == 0) {
+        if (u->prev_state != PA_SAILFISHOS_MEDIA_VOLUME_IN_SYNC &&
+            state         == PA_SAILFISHOS_MEDIA_VOLUME_IN_SYNC) {
+
+            if (u->volume_sync_delay_ms)
+                volume_sync_delayed_unmute_set(u);
+            else {
+                volume_sync_remove_mute_all(u);
+                u->mute_routing_active = false;
+            }
+        }
+        else if (u->prev_state == PA_SAILFISHOS_MEDIA_VOLUME_IN_SYNC &&
+                 state         != PA_SAILFISHOS_MEDIA_VOLUME_IN_SYNC) {
+
+            pa_log_debug("volumes out of sync");
+            volume_sync_delayed_unmute_stop(u);
+            if (!u->mute_routing_active) {
+                PA_IDXSET_FOREACH(si, u->core->sink_inputs, idx)
+                    volume_sync_add_mute(u, si);
+            }
+            u->mute_routing_active = true;
+        }
+
+        u->prev_state = state;
+    }
+
+    return PA_HOOK_OK;
+}
+
 /* create new volume steps set for route with linear steps.
  * route        - name of step route
  * call_steps   - number of steps for call case
@@ -336,6 +457,9 @@ static pa_hook_result_t parameters_changed_cb(pa_core *c, meego_parameter_update
 
     pa_assert(ua);
     pa_assert(u);
+
+    pa_shared_data_inc_integer(u->shared, PA_SAILFISHOS_MEDIA_VOLUME_SYNC,
+                                          PA_SAILFISHOS_MEDIA_VOLUME_CHANGING);
 
     if (u->route)
         pa_xfree(u->route);
@@ -394,6 +518,9 @@ static pa_hook_result_t parameters_changed_cb(pa_core *c, meego_parameter_update
     /* When mode changes immediately send HighVolume signal
      * containing the safe step if one is defined */
     check_and_signal_high_volume(u);
+
+    pa_shared_data_inc_integer(u->shared, PA_SAILFISHOS_MEDIA_VOLUME_SYNC,
+                                          PA_SAILFISHOS_MEDIA_VOLUME_CHANGE_DONE);
 
     return PA_HOOK_OK;
 }
@@ -539,6 +666,9 @@ static pa_hook_result_t sink_input_put_cb(pa_core *c, pa_object *o, struct mv_us
     if (!(role = pa_proplist_gets(si->proplist, PA_PROP_MEDIA_ROLE)))
         /* No media role, skip */
         goto end;
+
+    if (u->mute_routing_active)
+        volume_sync_add_mute(u, si);
 
     if (!pa_hashmap_get(u->notifier.roles, role))
         /* Not our stream, skip */
@@ -761,6 +891,8 @@ int pa__init(pa_module *m) {
 
     u->tuning_mode = false;
     u->virtual_stream = false;
+    u->mute_routing = DEFAULT_MUTE_ROUTING;
+    u->volume_sync_delay_ms = DEFAULT_VOLUME_SYNC_DELAY_MS;
 
     if (pa_modargs_get_value_boolean(ma, "tuning_mode", &u->tuning_mode) < 0) {
         pa_log_error("tuning_mode expects boolean argument");
@@ -772,12 +904,27 @@ int pa__init(pa_module *m) {
         goto fail;
     }
 
+    if (pa_modargs_get_value_boolean(ma, "mute_routing", &u->mute_routing) < 0) {
+        pa_log_error("mute_routing expects boolean argument");
+        goto fail;
+    }
+
+    if (pa_modargs_get_value_u32(ma, "unmute_delay", &u->volume_sync_delay_ms) < 0) {
+        pa_log_error("unmute_delay expects unsigned integer argument");
+        goto fail;
+    }
+
     notifier_conf = pa_modargs_get_value(ma, "listening_time_notifier_conf", NULL);
     setup_notifier(u, notifier_conf);
 
     u->shared = pa_shared_data_get(u->core);
     u->call_state_hook_slot = pa_shared_data_connect(u->shared, PA_NEMO_PROP_CALL_STATE, (pa_hook_cb_t) call_state_cb, u);
     u->media_state_hook_slot = pa_shared_data_connect(u->shared, PA_NEMO_PROP_MEDIA_STATE, (pa_hook_cb_t) media_state_cb, u);
+    if (u->mute_routing)
+        u->volume_sync_hook_slot = pa_shared_data_connect(u->shared,
+                                                          PA_SAILFISHOS_MEDIA_VOLUME_SYNC,
+                                                          (pa_hook_cb_t) volume_sync_cb, u);
+    u->prev_state = PA_SAILFISHOS_MEDIA_VOLUME_IN_SYNC;
 
     u->volume_proxy = pa_volume_proxy_get(u->core);
     u->volume_proxy_slot = pa_hook_connect(&pa_volume_proxy_hooks(u->volume_proxy)[PA_VOLUME_PROXY_HOOK_CHANGING],
@@ -814,6 +961,7 @@ void pa__done(pa_module *m) {
 
     meego_parameter_stop_updates("mainvolume", (pa_hook_cb_t) parameters_changed_cb, u);
 
+    volume_sync_delayed_unmute_stop(u);
     signal_timer_stop(u);
 
     dbus_done(u);
@@ -828,6 +976,9 @@ void pa__done(pa_module *m) {
 
     if (u->media_state_hook_slot)
         pa_hook_slot_free(u->media_state_hook_slot);
+
+    if (u->volume_sync_hook_slot)
+        pa_hook_slot_free(u->volume_sync_hook_slot);
 
     if (u->shared)
         pa_shared_data_unref(u->shared);
