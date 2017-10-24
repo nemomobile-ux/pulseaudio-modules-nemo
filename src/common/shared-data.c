@@ -38,6 +38,7 @@
 enum shared_item_type {
     SHARED_ITEM_NONE,
     SHARED_ITEM_BOOL,
+    SHARED_ITEM_INTEGER,
     SHARED_ITEM_STR,
     SHARED_ITEM_DATA,
     SHARED_ITEM_MAX
@@ -190,6 +191,89 @@ bool pa_shared_data_get_boolean(pa_shared_data *t, const char *key) {
         return true;
     else
         return false;
+}
+
+int pa_shared_data_get_integer(pa_shared_data *t, const char *key, int32_t *return_value) {
+    shared_item *item;
+
+    pa_assert(t);
+    pa_assert(key);
+    pa_assert(return_value);
+
+    if (!pa_proplist_key_valid(key))
+        return -1;
+
+    if (!(item = pa_hashmap_get(t->items, key)))
+        return -1;
+
+    GETI(t, key);
+
+    if (item->type != SHARED_ITEM_INTEGER)
+        return -1;
+
+    *return_value = PA_PTR_TO_INT(item->value);
+
+    return 0;
+}
+
+int pa_shared_data_set_integer(pa_shared_data *t, const char *key, int32_t value) {
+    shared_item *item;
+
+    pa_assert(key);
+
+    if (!pa_proplist_key_valid(key))
+        return -1;
+
+    GETI(t, key);
+
+    if (item->type == SHARED_ITEM_NONE) {
+        item->type = SHARED_ITEM_INTEGER;
+        item->value = PA_INT_TO_PTR(value);
+        item->nbytes = sizeof(void*);
+    } else if (item->type == SHARED_ITEM_INTEGER && PA_PTR_TO_INT(item->value) == value)
+        return 0;
+    else if (item->type != SHARED_ITEM_INTEGER)
+        return -1;
+
+    item->value = PA_INT_TO_PTR(value);
+
+    pa_log_debug("Shared item '%s' changes to integer value '%d'", item->key, PA_PTR_TO_INT(item->value));
+    pa_hook_fire(&item->changed_hook, item->key);
+
+    return 0;
+}
+
+int pa_shared_data_inc_integer(pa_shared_data *t, const char *key, int32_t change) {
+    shared_item *item;
+    int32_t new_value;
+
+    pa_assert(t);
+    pa_assert(key);
+
+    if (change == 0)
+        return 0;
+
+    if (!pa_proplist_key_valid(key))
+        return -1;
+
+    GETI(t, key);
+
+    if (item->type == SHARED_ITEM_NONE) {
+        item->value = PA_INT_TO_PTR(0);
+        item->type = SHARED_ITEM_INTEGER;
+        item->nbytes = sizeof(void*);
+    } else if (item->type != SHARED_ITEM_INTEGER)
+        return -1;
+
+    new_value = change + PA_PTR_TO_INT(item->value);
+
+    if (new_value != PA_PTR_TO_INT(item->value)) {
+        item->value = PA_INT_TO_PTR(new_value);
+        pa_log_debug("Shared item '%s' changes to integer value '%d'", item->key, PA_PTR_TO_INT(item->value));
+        pa_hook_fire(&item->changed_hook, item->key);
+    }
+
+    return 0;
 }
 
 static int shared_data_sets(pa_shared_data *t, const char *key, const char *value, bool fire_always) {
