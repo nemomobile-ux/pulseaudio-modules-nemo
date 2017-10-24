@@ -374,4 +374,11 @@ int pa_shared_data_getd(pa_shared_data *t, const char *key, const void **data, s
     return 0;
 }
 
+bool pa_shared_data_has_key(pa_shared_data *t, const char *key) {
+    pa_assert(t);
+    pa_assert(key);
+
+    return !!pa_hashmap_get(t->items, key);
+}
+
 #undef GETI

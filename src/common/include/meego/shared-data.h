@@ -31,6 +31,8 @@ pa_shared_data *pa_shared_data_get(pa_core *core);
 pa_shared_data *pa_shared_data_ref(pa_shared_data *t);
 void pa_shared_data_unref(pa_shared_data *t);
 
+bool pa_shared_data_has_key(pa_shared_data *t, const char *key);
+
 /* Set boolean value to shared item. Fire value changed hook if value has changed from previous value.
  * Return 0 on success, -1 on failure */
 int pa_shared_data_set_boolean(pa_shared_data *t, const char *key, bool value);
