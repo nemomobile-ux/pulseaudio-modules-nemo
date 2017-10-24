@@ -96,7 +96,8 @@ pa_shared_data *pa_shared_data_ref(pa_shared_data *t) {
 static void shared_item_free(shared_item *i) {
     pa_hook_done(&i->changed_hook);
     pa_xfree(i->key);
-    pa_xfree(i->value);
+    if (i->type == SHARED_ITEM_STR || i->type == SHARED_ITEM_DATA)
+        pa_xfree(i->value);
     pa_xfree(i);
 }
 
