@@ -133,6 +133,8 @@ install -m 644 src/common/include/meego/*.h %{buildroot}/%{_prefix}/include/puls
 install -m 644 src/voice/module-voice-api.h %{buildroot}/%{_prefix}/include/pulsecore/modules/meego
 install -m 644 src/music/module-music-api.h %{buildroot}/%{_prefix}/include/pulsecore/modules/meego
 install -m 644 src/record/module-record-api.h %{buildroot}/%{_prefix}/include/pulsecore/modules/meego
+install -d %{buildroot}/%{_prefix}/include/pulsecore/modules/sailfishos
+install -m 644 src/common/include/sailfishos/*.h %{buildroot}/%{_prefix}/include/pulsecore/modules/sailfishos
 install -d %{buildroot}/%{_libdir}/pkgconfig
 install -m 644 src/common/*.pc %{buildroot}/%{_libdir}/pkgconfig
 
@@ -176,4 +178,5 @@ install -m 644 src/common/*.pc %{buildroot}/%{_libdir}/pkgconfig
 %files devel
 %defattr(-,root,root,-)
 %{_prefix}/include/pulsecore/modules/meego/*.h
+%{_prefix}/include/pulsecore/modules/sailfishos/*.h
 %{_libdir}/pkgconfig/*.pc
