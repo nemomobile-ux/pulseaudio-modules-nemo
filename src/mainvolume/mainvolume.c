@@ -29,9 +29,9 @@
 #include <pulsecore/core-util.h>
 #include <pulsecore/hashmap.h>
 
-#include "call-state-tracker.h"
-#include "volume-proxy.h"
-#include "proplist-nemo.h"
+#include "meego/call-state-tracker.h"
+#include "meego/volume-proxy.h"
+#include "meego/proplist-nemo.h"
 
 #include "mainvolume.h"
 

@@ -34,8 +34,8 @@
 #include <pulsecore/hook-list.h>
 #include <pulsecore/strlist.h>
 
-#include "shared-data.h"
-#include "volume-proxy.h"
+#include "meego/shared-data.h"
+#include "meego/volume-proxy.h"
 #include "listening-watchdog.h"
 
 #define MEDIA_STREAM "sink-input-by-media-role:x-maemo"

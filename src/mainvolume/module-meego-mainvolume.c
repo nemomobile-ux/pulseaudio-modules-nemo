@@ -42,11 +42,11 @@
 #include "mainvolume.h"
 #include "listening-watchdog.h"
 
-#include "parameter-hook.h"
-#include "proplist-meego.h"
-#include "proplist-nemo.h"
-#include "shared-data.h"
-#include "volume-proxy.h"
+#include "meego/parameter-hook.h"
+#include "meego/proplist-meego.h"
+#include "meego/proplist-nemo.h"
+#include "meego/shared-data.h"
+#include "meego/volume-proxy.h"
 
 PA_MODULE_AUTHOR("Juho Hämäläinen");
 PA_MODULE_DESCRIPTION("Nokia mainvolume module");
