@@ -4,8 +4,8 @@ AM_CFLAGS =						\
 	-I$(top_srcdir)/src/common/include/meego
 
 AM_LIBADD =							\
-	$(PULSEAUDIO_LIBS)					\
-	$(top_builddir)/src/common/libmeego-common.la
+	$(top_builddir)/src/common/libmeego-common.la		\
+	$(PULSEAUDIO_LIBS)
 
 ###################################
 #             Voice               #
