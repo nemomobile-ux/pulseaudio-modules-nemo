@@ -1,6 +1,6 @@
 AM_CFLAGS = $(PULSEAUDIO_CFLAGS) -I$(top_srcdir)/src -I$(top_srcdir)/src/common/include
 
-AM_LIBADD = $(PULSEAUDIO_LIBS) -lm $(top_builddir)/src/common/libmeego-common.la
+AM_LIBADD = -lm $(top_builddir)/src/common/libmeego-common.la $(PULSEAUDIO_LIBS)
 
 modlibexec_LTLIBRARIES = module-meego-parameters.la
 

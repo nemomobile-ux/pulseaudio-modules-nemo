@@ -13,5 +13,5 @@ noinst_HEADERS = module-meego-record-symdef.h
 module_meego_record_la_SOURCES = module-meego-record.c
 
 module_meego_record_la_LDFLAGS = -module -avoid-version -Wl,-no-undefined -Wl,-z,noexecstack
-module_meego_record_la_LIBADD = $(AM_LIBADD) $(PULSEAUDIO_LIBS) -lm $(top_builddir)/src/common/libmeego-common.la
+module_meego_record_la_LIBADD = $(AM_LIBADD) $(PULSEAUDIO_LIBS) -lm
 module_meego_record_la_CFLAGS = $(AM_CFLAGS)

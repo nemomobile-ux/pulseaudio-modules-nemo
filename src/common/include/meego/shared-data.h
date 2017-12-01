@@ -31,12 +31,25 @@ pa_shared_data *pa_shared_data_get(pa_core *core);
 pa_shared_data *pa_shared_data_ref(pa_shared_data *t);
 void pa_shared_data_unref(pa_shared_data *t);
 
+bool pa_shared_data_has_key(pa_shared_data *t, const char *key);
+
 /* Set boolean value to shared item. Fire value changed hook if value has changed from previous value.
  * Return 0 on success, -1 on failure */
 int pa_shared_data_set_boolean(pa_shared_data *t, const char *key, bool value);
 /* Get boolean value from shared item. If shared item exists but is of different type than BOOLEAN, return true.
  * If shared item doesn't exist, returns false. */
 bool pa_shared_data_get_boolean(pa_shared_data *t, const char *key);
+
+/* Set integer value to shared item. If item with identical key already exists and has different
+ * type, return -1. If key is invalid, return -1. Returns 0 on success. */
+int pa_shared_data_set_integer(pa_shared_data *t, const char *key, int32_t value);
+/* Get integer value from shared item. If item doesn't exist or the key is incorrect,
+ * return -1. Returns 0 on success. */
+int pa_shared_data_get_integer(pa_shared_data *t, const char *key, int32_t *return_value);
+/* Changes the shared data integer value. Value defaults to 0 if key doesn't already exist.
+ * If item already exist with different type than integer or the key is incorrect return -1.
+ * Returns 0 on success. */
+int pa_shared_data_inc_integer(pa_shared_data *t, const char *key, int32_t change);
 
 /* Set char value to shared item. Fire value changed hook if value has changed from previous value.
  * Return 0 on success, -1 on failure */
