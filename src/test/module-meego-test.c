@@ -67,6 +67,9 @@ static const char* const valid_modargs[] = {
     "hwid",
     "property",
     "value",
+    "cork",
+    "uncork",
+    "sink-input",
     NULL,
 };
 
@@ -74,6 +77,8 @@ static const char* const valid_modargs[] = {
 #define OP_SINK_INPUT "si"
 #define OP_PROPLIST "proplist"
 #define OP_CALL "call"
+#define OP_CORK "cork"
+#define OP_UNCORK "uncork"
 
 struct userdata {
     pa_core *core;
@@ -151,16 +156,27 @@ static void test_call(struct userdata *u, pa_modargs *ma) {
 
     pa_assert(shared);
 
-    if (pa_modargs_get_value_boolean(ma, "active", &active) < 0) {
+    if (pa_modargs_get_value_boolean(ma, "active", &active) < 0)
         pa_log_error("call op (active) expects boolean argument");
-        goto end;
+    else
+        pa_shared_data_sets(shared, PA_NEMO_PROP_CALL_STATE, active ? PA_NEMO_PROP_CALL_STATE_ACTIVE : PA_NEMO_PROP_CALL_STATE_INACTIVE);
+
+    pa_shared_data_unref(shared);
+}
+
+static void test_cork(struct userdata *u, pa_modargs *ma, bool corked) {
+    uint32_t idx;
+    pa_sink_input *si;
+
+    if (pa_modargs_get_value_u32(ma, "sink-input", &idx) < 0)
+        pa_log_error("%scork op (sink-input) expects unsigned argument", corked ? "" : "un");
+    else {
+        if (!(si = pa_idxset_get_by_index(u->core->sink_inputs, idx)))
+            pa_log_error("no sink-input found with idx %u", idx);
+        else
+            pa_sink_input_cork(si, corked);
     }
 
-    pa_shared_data_sets(shared, PA_NEMO_PROP_CALL_STATE, active ? PA_NEMO_PROP_CALL_STATE_ACTIVE : PA_NEMO_PROP_CALL_STATE_INACTIVE);
-
-end:
-    pa_shared_data_unref(shared);
-    pa_module_unload_request(u->module, true);
 }
 
 static void test_proplist(struct userdata *u, pa_modargs *ma) {
@@ -206,8 +222,6 @@ static void test_proplist(struct userdata *u, pa_modargs *ma) {
 
     pa_proplist_free(p);
     pa_sink_unref(s);
-
-    pa_module_unload_request(u->module, true);
 }
 
 static void test_audio_mode(struct userdata *u, pa_modargs *ma) {
@@ -235,9 +249,6 @@ static void test_audio_mode(struct userdata *u, pa_modargs *ma) {
 
     pa_sink_update_proplist(hw_sink, PA_UPDATE_REPLACE, p);
     pa_proplist_free(p);
-
-    /* Work done, let's unload */
-    pa_module_unload_request(u->module, true);
 }
 
 int pa__init(pa_module*m) {
@@ -272,7 +283,13 @@ int pa__init(pa_module*m) {
         test_proplist(u, ma);
     else if (pa_streq(op, OP_CALL))
         test_call(u, ma);
+    else if (pa_streq(op, OP_CORK))
+        test_cork(u, ma, true);
+    else if (pa_streq(op, OP_UNCORK))
+        test_cork(u, ma, false);
 
+    /* unload test module immediately, as the work is now done. */
+    pa_module_unload_request(u->module, true);
     pa_modargs_free(ma);
 
     return 0;

@@ -174,8 +174,6 @@ PKG_CHECK_MODULES([PULSEAUDIO], [libpulse >= 2.1 pulsecore >= 2.1 ])
 AC_SUBST(PULSEAUDIO_CFLAGS)
 AC_SUBST(PULSEAUDIO_LIBS)
 
-pulseaudiodir=`pkg-config --variable=prefix pulsecore`
-
 PKG_CHECK_MODULES([CHECK], [check >= 0.9.4])
 AC_SUBST(CHECK_CFLAGS)
 AC_SUBST(CHECK_LIBS)
@@ -188,9 +186,10 @@ PKG_CHECK_MODULES([ASOUNDLIB], [ alsa >= 1.0.19 ])
 AC_SUBST(ASOUNDLIB_CFLAGS)
 AC_SUBST(ASOUNDLIB_LIBS)
 
-AC_ARG_WITH([module-dir],
-        AS_HELP_STRING([--with-module-dir],[Directory where to install the modules to (defaults to ${pulseaudiodir}/lib/pulse-${PA_MAJORMINOR}/modules/]),
-        [modlibexecdir=$withval], [modlibexecdir="${pulseaudiodir}/lib/pulse-${PA_MAJORMINOR}/modules"])
+AC_ARG_WITH(
+        [module-dir],
+        AS_HELP_STRING([--with-module-dir],[Directory where to install the modules to (defaults to ${libdir}/pulse-${PA_MAJORMINOR}/modules]),
+        [modlibexecdir=$withval], [modlibexecdir="${libdir}/pulse-${PA_MAJORMINOR}/modules"])
 
 AC_SUBST(modlibexecdir)
 
@@ -262,7 +261,6 @@ echo "
     CFLAGS:                 ${CFLAGS}
 
     prefix:                 ${prefix}
-    PulseAudio prefix:      ${pulseaudiodir}
     modules directory:      ${modlibexecdir}
 
     Enable x86 libraries    ${ENABLE_X86}
