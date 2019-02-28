@@ -150,6 +150,15 @@ static int source_set_state(pa_source *s, pa_source_state_t state) {
     return 0;
 }
 
+#if PULSEAUDIO_VERSION >= 12
+static int source_set_state_in_main_thread(pa_source *s, pa_source_state_t state, pa_suspend_cause_t suspend_cause) {
+    if (s->state == state)
+        return 0;
+
+    return source_set_state(s, state);
+}
+#endif
+
 /*************************
   SOURCE OUTPUT CALLBACKS
  *************************/
@@ -459,7 +468,11 @@ int pa__init(pa_module*m) {
     }
 
     u->source->parent.process_msg = source_process_msg;
+#if PULSEAUDIO_VERSION >= 12
+    u->source->set_state_in_main_thread = source_set_state_in_main_thread;
+#else
     u->source->set_state = source_set_state;
+#endif
     u->source->update_requested_latency = source_update_requested_latency;
 
     u->source->userdata = u;

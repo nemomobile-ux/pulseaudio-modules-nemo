@@ -171,6 +171,15 @@ static int sink_set_state(pa_sink *s, pa_sink_state_t state) {
     return 0;
 }
 
+#if PULSEAUDIO_VERSION >= 12
+static int sink_set_state_in_main_thread(pa_sink *s, pa_sink_state_t state, pa_suspend_cause_t suspend_cause) {
+    if (s->state == state)
+        return 0;
+
+    return sink_set_state(s, state);
+}
+#endif
+
 /* Called from I/O thread context */
 static void sink_request_rewind(pa_sink *s) {
     struct userdata *u;
@@ -568,7 +577,11 @@ int pa__init(pa_module*m) {
     }
 
     u->sink->parent.process_msg = sink_process_msg;
+#if PULSEAUDIO_VERSION >= 12
+    u->sink->set_state_in_main_thread = sink_set_state_in_main_thread;
+#else
     u->sink->set_state = sink_set_state;
+#endif
     u->sink->update_requested_latency = sink_update_requested_latency;
     u->sink->request_rewind = sink_request_rewind;
     u->sink->userdata = u;

@@ -78,6 +78,15 @@ static int voip_source_set_state(pa_source *s, pa_source_state_t state) {
     return ret;
 }
 
+#if PULSEAUDIO_VERSION >= 12
+static int source_set_state_in_main_thread(pa_source *s, pa_source_state_t state, pa_suspend_cause_t suspend_cause) {
+    if (s->state == state)
+        return 0;
+
+    return voip_source_set_state(s, state);
+}
+#endif
+
 /* Called from I/O thread context */
 static void voip_source_update_requested_latency(pa_source *s) {
     struct userdata *u;
@@ -120,7 +129,11 @@ int voice_init_voip_source(struct userdata *u, const char *name) {
     }
 
     u->voip_source->parent.process_msg = voip_source_process_msg;
+#if PULSEAUDIO_VERSION >= 12
+    u->voip_source->set_state_in_main_thread = source_set_state_in_main_thread;
+#else
     u->voip_source->set_state = voip_source_set_state;
+#endif
     u->raw_source->update_requested_latency = voip_source_update_requested_latency;
     u->voip_source->userdata = u;
 
