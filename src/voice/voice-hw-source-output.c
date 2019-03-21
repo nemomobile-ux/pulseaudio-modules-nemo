@@ -556,6 +556,8 @@ static pa_hook_result_t hw_source_output_flags_changed_cb(pa_core *c, pa_source 
      * manually. */
     if (u->voip_source)
         pa_source_update_flags(u->voip_source, PA_SOURCE_LATENCY|PA_SOURCE_DYNAMIC_LATENCY, o->flags);
+
+    return PA_HOOK_OK;
 }
 
 /* Called from the IO thread. */
