@@ -94,6 +94,15 @@ static int voip_sink_set_state(pa_sink *s, pa_sink_state_t state) {
     return ret;
 }
 
+#if PULSEAUDIO_VERSION >= 12
+static int sink_set_state_in_main_thread(pa_sink *s, pa_sink_state_t state, pa_suspend_cause_t suspend_cause) {
+    if (s->state == state)
+        return 0;
+
+    return voip_sink_set_state(s, state);
+}
+#endif
+
 /* Called from I/O thread context */
 static void voip_sink_request_rewind(pa_sink *s) {
     struct userdata *u;
@@ -164,7 +173,11 @@ int voice_init_voip_sink(struct userdata *u, const char *name) {
     }
 
     u->voip_sink->parent.process_msg = voip_sink_process_msg;
+#if PULSEAUDIO_VERSION >= 12
+    u->voip_sink->set_state_in_main_thread = sink_set_state_in_main_thread;
+#else
     u->voip_sink->set_state = voip_sink_set_state;
+#endif
     u->voip_sink->update_requested_latency = voip_sink_update_requested_latency;
     u->voip_sink->request_rewind = voip_sink_request_rewind;
     u->voip_sink->userdata = u;

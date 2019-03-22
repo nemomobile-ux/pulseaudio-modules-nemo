@@ -63,6 +63,15 @@ static int raw_source_set_state(pa_source *s, pa_source_state_t state) {
     return ret;
 }
 
+#if PULSEAUDIO_VERSION >= 12
+static int source_set_state_in_main_thread(pa_source *s, pa_source_state_t state, pa_suspend_cause_t suspend_cause) {
+    if (s->state == state)
+        return 0;
+
+    return raw_source_set_state(s, state);
+}
+#endif
+
 /* Called from I/O thread context */
 static void raw_source_update_requested_latency(pa_source *s) {
     struct userdata *u;
@@ -104,7 +113,11 @@ int voice_init_raw_source(struct userdata *u, const char *name) {
     }
 
     u->raw_source->parent.process_msg = raw_source_process_msg;
+#if PULSEAUDIO_VERSION >= 12
+    u->raw_source->set_state_in_main_thread = source_set_state_in_main_thread;
+#else
     u->raw_source->set_state = raw_source_set_state;
+#endif
     u->raw_source->update_requested_latency = raw_source_update_requested_latency;
     u->raw_source->userdata = u;
     pa_source_set_asyncmsgq(u->raw_source, u->master_source->asyncmsgq);

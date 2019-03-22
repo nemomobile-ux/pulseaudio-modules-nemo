@@ -2,7 +2,6 @@ AM_CFLAGS = \
 	$(PULSEAUDIO_CFLAGS) \
 	$(DBUS_CFLAGS) \
 	-DHAVE_DBUS \
-	-DPULSEAUDIO_VERSION=@PA_MAJOR@ \
 	-I$(top_srcdir)/src/common/include/meego
 
 AM_LIBADD = $(PULSEAUDIO_LIBS) $(DBUS_LIBS)

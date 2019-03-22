@@ -74,6 +74,15 @@ static int raw_sink_set_state(pa_sink *s, pa_sink_state_t state) {
     return ret;
 }
 
+#if PULSEAUDIO_VERSION >= 12
+static int sink_set_state_in_main_thread(pa_sink *s, pa_sink_state_t state, pa_suspend_cause_t suspend_cause) {
+    if (s->state == state)
+        return 0;
+
+    return raw_sink_set_state(s, state);
+}
+#endif
+
 /* Called from I/O thread context */
 static void raw_sink_request_rewind(pa_sink *s) {
     struct userdata *u;
@@ -139,7 +148,11 @@ int voice_init_raw_sink(struct userdata *u, const char *name) {
     }
 
     u->raw_sink->parent.process_msg = raw_sink_process_msg;
+#if PULSEAUDIO_VERSION >= 12
+    u->raw_sink->set_state_in_main_thread = sink_set_state_in_main_thread;
+#else
     u->raw_sink->set_state = raw_sink_set_state;
+#endif
     u->raw_sink->update_requested_latency = raw_sink_update_requested_latency;
     u->raw_sink->request_rewind = raw_sink_request_rewind;
     u->raw_sink->userdata = u;
