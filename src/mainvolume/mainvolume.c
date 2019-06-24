@@ -48,7 +48,7 @@ struct mv_volume_steps* mv_active_steps(struct mv_userdata *u) {
     pa_assert(u);
     pa_assert(u->current_steps);
 
-    if (u->call_active)
+    if (u->call_active || u->emergency_call_active)
         return &u->current_steps->call;
     else
         return &u->current_steps->media;
