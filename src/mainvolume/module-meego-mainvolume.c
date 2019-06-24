@@ -162,14 +162,10 @@ static void signal_steps(struct mv_userdata *u) {
 }
 
 static void sink_input_kill_cb(pa_sink_input *i) {
-    struct mv_userdata *u;
-
     pa_sink_input_assert_ref(i);
-    pa_assert_se(u = i->userdata);
 
-    pa_sink_input_unlink(u->virtual_sink_input);
-    pa_sink_input_unref(u->virtual_sink_input);
-    u->virtual_sink_input = NULL;
+    pa_sink_input_unlink(i);
+    pa_sink_input_unref(i);
 }
 
 /* no-op */
@@ -218,14 +214,27 @@ static void create_virtual_stream(struct mv_userdata *u) {
 }
 
 static void destroy_virtual_stream(struct mv_userdata *u) {
+    pa_sink_input *i;
+
     pa_assert(u);
 
     if (!u->virtual_sink_input)
         return;
 
-    sink_input_kill_cb(u->virtual_sink_input);
+    i = u->virtual_sink_input;
+    u->virtual_sink_input = NULL;
+    pa_sink_input_kill(i);
 
     pa_log_debug("removed virtual stream.");
+}
+
+static void update_virtual_stream(struct mv_userdata *u) {
+    pa_assert(u);
+
+    if (u->call_active)
+        create_virtual_stream(u);
+    else
+        destroy_virtual_stream(u);
 }
 
 static pa_hook_result_t call_state_cb(pa_core *c, const char *key, struct mv_userdata *u) {
@@ -244,10 +253,7 @@ static pa_hook_result_t call_state_cb(pa_core *c, const char *key, struct mv_use
                  u->call_active ? PA_NEMO_PROP_CALL_STATE_ACTIVE : PA_NEMO_PROP_CALL_STATE_INACTIVE,
                  u->current_steps->media.current_step, u->current_steps->call.current_step);
 
-    if (u->call_active)
-        create_virtual_stream(u);
-    else
-        destroy_virtual_stream(u);
+    update_virtual_stream(u);
 
     signal_steps(u);
 
