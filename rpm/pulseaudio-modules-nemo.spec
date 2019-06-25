@@ -5,7 +5,7 @@
 Name:       pulseaudio-modules-nemo
 
 Summary:    PulseAudio modules for Nemo
-Version:    %{pulsemajorminor}.26
+Version:    %{pulsemajorminor}.27
 Release:    1
 Group:      Multimedia/PulseAudio
 License:    LGPLv2.1+
