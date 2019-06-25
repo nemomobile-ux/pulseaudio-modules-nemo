@@ -162,14 +162,10 @@ static void signal_steps(struct mv_userdata *u) {
 }
 
 static void sink_input_kill_cb(pa_sink_input *i) {
-    struct mv_userdata *u;
-
     pa_sink_input_assert_ref(i);
-    pa_assert_se(u = i->userdata);
 
-    pa_sink_input_unlink(u->virtual_sink_input);
-    pa_sink_input_unref(u->virtual_sink_input);
-    u->virtual_sink_input = NULL;
+    pa_sink_input_unlink(i);
+    pa_sink_input_unref(i);
 }
 
 /* no-op */
@@ -218,20 +214,36 @@ static void create_virtual_stream(struct mv_userdata *u) {
 }
 
 static void destroy_virtual_stream(struct mv_userdata *u) {
+    pa_sink_input *i;
+
     pa_assert(u);
 
     if (!u->virtual_sink_input)
         return;
 
-    sink_input_kill_cb(u->virtual_sink_input);
+    i = u->virtual_sink_input;
+    u->virtual_sink_input = NULL;
+    pa_sink_input_kill(i);
 
     pa_log_debug("removed virtual stream.");
 }
 
-static pa_hook_result_t call_state_cb(pa_core *c, const char *key, struct mv_userdata *u) {
+static void update_virtual_stream(struct mv_userdata *u) {
+    pa_assert(u);
+
+    if (u->call_active || u->emergency_call_active)
+        create_virtual_stream(u);
+    else
+        destroy_virtual_stream(u);
+}
+
+static pa_hook_result_t call_state_cb(void *hook_data, void *call_data, void *slot_data) {
+    const char *key       = call_data;
+    struct mv_userdata *u = slot_data;
+
     const char *str;
 
-    pa_assert(c);
+    pa_assert(key);
     pa_assert(u);
     pa_assert(u->current_steps);
 
@@ -244,10 +256,7 @@ static pa_hook_result_t call_state_cb(pa_core *c, const char *key, struct mv_use
                  u->call_active ? PA_NEMO_PROP_CALL_STATE_ACTIVE : PA_NEMO_PROP_CALL_STATE_INACTIVE,
                  u->current_steps->media.current_step, u->current_steps->call.current_step);
 
-    if (u->call_active)
-        create_virtual_stream(u);
-    else
-        destroy_virtual_stream(u);
+    update_virtual_stream(u);
 
     signal_steps(u);
 
@@ -281,11 +290,14 @@ static void update_media_state(struct mv_userdata *u) {
     }
 }
 
-static pa_hook_result_t media_state_cb(pa_core *c, const char *key, struct mv_userdata *u) {
+static pa_hook_result_t media_state_cb(void *hook_data, void *call_data, void *slot_data) {
+    const char *key       = call_data;
+    struct mv_userdata *u = slot_data;
+
     const char *str;
     media_state_t state;
 
-    pa_assert(c);
+    pa_assert(key);
     pa_assert(u);
 
     if (!(str = pa_shared_data_gets(u->shared, key)))
@@ -299,6 +311,47 @@ static pa_hook_result_t media_state_cb(pa_core *c, const char *key, struct mv_us
     u->notifier.policy_media_state = state;
 
     update_media_state(u);
+
+    return PA_HOOK_OK;
+}
+
+static void update_emergency_call_state(struct mv_userdata *u, bool new_state) {
+    struct mv_volume_steps *steps;
+    pa_cvolume vol;
+
+    pa_assert(u);
+
+    if (new_state != u->emergency_call_active) {
+        u->emergency_call_active = new_state;
+        pa_log_info("Emergency call state changes to %s", u->emergency_call_active ? "active" : "inactive");
+
+        update_virtual_stream(u);
+        steps = mv_active_steps(u);
+
+        pa_volume_proxy_get_volume(u->volume_proxy, CALL_STREAM, &vol);
+
+        if (u->emergency_call_active)
+            pa_cvolume_set(&vol, vol.channels, mv_step_value(steps, steps->n_steps - 1));
+        else
+            pa_cvolume_set(&vol, vol.channels, mv_step_value(steps, steps->current_step));
+
+        pa_volume_proxy_set_volume(u->volume_proxy, CALL_STREAM, &vol, false);
+    }
+}
+
+static pa_hook_result_t emergency_call_state_cb(void *hook_data, void *call_data, void *slot_data) {
+    const char *key       = call_data;
+    struct mv_userdata *u = slot_data;
+
+    const char *str;
+
+    pa_assert(key);
+    pa_assert(u);
+
+    if (!(str = pa_shared_data_gets(u->shared, key)))
+        return PA_HOOK_OK;
+
+    update_emergency_call_state(u, pa_streq(str, PA_NEMO_PROP_EMERGENCY_CALL_STATE_ACTIVE));
 
     return PA_HOOK_OK;
 }
@@ -382,7 +435,10 @@ static void volume_sync_delayed_unmute_set(struct mv_userdata *u) {
         u->volume_unmute_time_event = pa_core_rttime_new(u->core, time, volume_sync_delayed_unmute_cb, u);
 }
 
-static pa_hook_result_t volume_sync_cb(pa_core *c, const char *key, struct mv_userdata *u) {
+static pa_hook_result_t volume_sync_cb(void *hook_data, void *call_data, void *slot_data) {
+    const char *key       = call_data;
+    struct mv_userdata *u = slot_data;
+
     pa_sink_input *si;
     uint32_t idx;
     int32_t state;
@@ -450,7 +506,10 @@ static struct mv_volume_steps_set* fallback_new(const char *route, const int cal
     return fallback;
 }
 
-static pa_hook_result_t parameters_changed_cb(pa_core *c, meego_parameter_update_args *ua, struct mv_userdata *u) {
+static pa_hook_result_t parameters_changed_cb(void *hook_data, void *call_data, void *slot_data) {
+    meego_parameter_update_args *ua = call_data;
+    struct mv_userdata *u           = slot_data;
+
     struct mv_volume_steps_set *set;
     pa_proplist *p = NULL;
     bool ret = false;
@@ -541,9 +600,10 @@ static bool step_and_call_values(struct mv_userdata *u,
         return false;
 }
 
-static pa_hook_result_t volume_changing_cb(pa_volume_proxy *r,
-                                           pa_volume_proxy_entry *e,
-                                           struct mv_userdata *u) {
+static pa_hook_result_t volume_changing_cb(void *hook_data, void *call_data, void *slot_data) {
+    pa_volume_proxy_entry *e = call_data;
+    struct mv_userdata *u    = slot_data;
+
     struct mv_volume_steps *steps;
     uint32_t new_step;
     bool call_steps;
@@ -552,6 +612,12 @@ static pa_hook_result_t volume_changing_cb(pa_volume_proxy *r,
 
     if (!step_and_call_values(u, e->name, &steps, &call_steps))
         return PA_HOOK_OK;
+
+    if (u->emergency_call_active && pa_streq(e->name, CALL_STREAM)) {
+        pa_log_info("Reset call volume to maximum with emergency call.");
+        pa_cvolume_set(&e->volume, e->volume.channels, mv_step_value(steps, steps->n_steps - 1));
+        return PA_HOOK_OK;
+    }
 
     /* Check only once per module load / parsed step set
      * if volume is higher than safe step. If so, reset to
@@ -569,9 +635,10 @@ static pa_hook_result_t volume_changing_cb(pa_volume_proxy *r,
     return PA_HOOK_OK;
 }
 
-static pa_hook_result_t volume_changed_cb(pa_volume_proxy *r,
-                                          pa_volume_proxy_entry *e,
-                                          struct mv_userdata *u) {
+static pa_hook_result_t volume_changed_cb(void *hook_data, void *call_data, void *slot_data) {
+    pa_volume_proxy_entry *e = call_data;
+    struct mv_userdata *u    = slot_data;
+
     struct mv_volume_steps *steps;
     uint32_t new_step;
     bool call_steps;
@@ -918,27 +985,28 @@ int pa__init(pa_module *m) {
     setup_notifier(u, notifier_conf);
 
     u->shared = pa_shared_data_get(u->core);
-    u->call_state_hook_slot = pa_shared_data_connect(u->shared, PA_NEMO_PROP_CALL_STATE, (pa_hook_cb_t) call_state_cb, u);
-    u->media_state_hook_slot = pa_shared_data_connect(u->shared, PA_NEMO_PROP_MEDIA_STATE, (pa_hook_cb_t) media_state_cb, u);
+    u->call_state_hook_slot = pa_shared_data_connect(u->shared, PA_NEMO_PROP_CALL_STATE, call_state_cb, u);
+    u->media_state_hook_slot = pa_shared_data_connect(u->shared, PA_NEMO_PROP_MEDIA_STATE, media_state_cb, u);
+    u->emergency_call_state_hook_slot = pa_shared_data_connect(u->shared, PA_NEMO_PROP_EMERGENCY_CALL_STATE, emergency_call_state_cb, u);
     if (u->mute_routing)
         u->volume_sync_hook_slot = pa_shared_data_connect(u->shared,
                                                           PA_SAILFISHOS_MEDIA_VOLUME_SYNC,
-                                                          (pa_hook_cb_t) volume_sync_cb, u);
+                                                          volume_sync_cb, u);
     u->prev_state = PA_SAILFISHOS_MEDIA_VOLUME_IN_SYNC;
 
     u->volume_proxy = pa_volume_proxy_get(u->core);
     u->volume_proxy_slot = pa_hook_connect(&pa_volume_proxy_hooks(u->volume_proxy)[PA_VOLUME_PROXY_HOOK_CHANGING],
                                            PA_HOOK_NORMAL,
-                                           (pa_hook_cb_t) volume_changing_cb,
+                                           volume_changing_cb,
                                            u);
     u->volume_proxy_slot = pa_hook_connect(&pa_volume_proxy_hooks(u->volume_proxy)[PA_VOLUME_PROXY_HOOK_CHANGED],
                                            PA_HOOK_NORMAL,
-                                           (pa_hook_cb_t) volume_changed_cb,
+                                           volume_changed_cb,
                                            u);
 
     dbus_init(u);
 
-    meego_parameter_request_updates("mainvolume", (pa_hook_cb_t) parameters_changed_cb, PA_HOOK_EARLY, true, u);
+    meego_parameter_request_updates("mainvolume", parameters_changed_cb, PA_HOOK_EARLY, true, u);
 
     pa_modargs_free(ma);
 
@@ -959,7 +1027,7 @@ void pa__done(pa_module *m) {
 
     notifier_done(u);
 
-    meego_parameter_stop_updates("mainvolume", (pa_hook_cb_t) parameters_changed_cb, u);
+    meego_parameter_stop_updates("mainvolume", parameters_changed_cb, u);
 
     volume_sync_delayed_unmute_stop(u);
     signal_timer_stop(u);
@@ -976,6 +1044,9 @@ void pa__done(pa_module *m) {
 
     if (u->media_state_hook_slot)
         pa_hook_slot_free(u->media_state_hook_slot);
+
+    if (u->emergency_call_state_hook_slot)
+        pa_hook_slot_free(u->emergency_call_state_hook_slot);
 
     if (u->volume_sync_hook_slot)
         pa_hook_slot_free(u->volume_sync_hook_slot);
@@ -1197,7 +1268,10 @@ void dbus_signal_steps(struct mv_userdata *u) {
 
     steps = mv_active_steps(u);
     step_count = steps->n_steps;
-    current_step = steps->current_step;
+    if (u->emergency_call_active)
+        current_step = steps->n_steps - 1;
+    else
+        current_step = steps->current_step;
 
     pa_log_debug("signal active step %u", current_step);
 
@@ -1300,6 +1374,11 @@ void mainvolume_set_current_step(DBusConnection *conn, DBusMessage *msg, DBusMes
     pa_assert(msg);
     pa_assert(u);
 
+    if (u->emergency_call_active) {
+        pa_log_info("D-Bus: Emergency call is active, don't allow changing volume.");
+        goto done;
+    }
+
     steps = mv_active_steps(u);
 
     dbus_message_iter_get_basic(iter,  &set_step);
@@ -1319,6 +1398,7 @@ void mainvolume_set_current_step(DBusConnection *conn, DBusMessage *msg, DBusMes
         pa_volume_proxy_set_volume(u->volume_proxy, stream, &vol, false);
     }
 
+done:
     pa_dbus_send_empty_reply(conn, msg);
 
     u->last_step_set_timestamp = pa_rtclock_now();

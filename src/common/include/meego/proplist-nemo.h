@@ -32,5 +32,9 @@
 #define PA_NEMO_PROP_MEDIA_STATE_BACKGROUND         "background"
 #define PA_NEMO_PROP_MEDIA_STATE_ACTIVE             "active"
 
+#define PA_NEMO_PROP_EMERGENCY_CALL_STATE           "x.emergency_call.state"
+#define PA_NEMO_PROP_EMERGENCY_CALL_STATE_INACTIVE  "inactive"
+#define PA_NEMO_PROP_EMERGENCY_CALL_STATE_ACTIVE    "active"
+
 
 #endif /* _PROPLIST_NEMO_H_ */
