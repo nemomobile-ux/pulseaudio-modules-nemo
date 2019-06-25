@@ -237,10 +237,13 @@ static void update_virtual_stream(struct mv_userdata *u) {
         destroy_virtual_stream(u);
 }
 
-static pa_hook_result_t call_state_cb(pa_core *c, const char *key, struct mv_userdata *u) {
+static pa_hook_result_t call_state_cb(void *hook_data, void *call_data, void *slot_data) {
+    const char *key       = call_data;
+    struct mv_userdata *u = slot_data;
+
     const char *str;
 
-    pa_assert(c);
+    pa_assert(key);
     pa_assert(u);
     pa_assert(u->current_steps);
 
@@ -287,11 +290,14 @@ static void update_media_state(struct mv_userdata *u) {
     }
 }
 
-static pa_hook_result_t media_state_cb(pa_core *c, const char *key, struct mv_userdata *u) {
+static pa_hook_result_t media_state_cb(void *hook_data, void *call_data, void *slot_data) {
+    const char *key       = call_data;
+    struct mv_userdata *u = slot_data;
+
     const char *str;
     media_state_t state;
 
-    pa_assert(c);
+    pa_assert(key);
     pa_assert(u);
 
     if (!(str = pa_shared_data_gets(u->shared, key)))
@@ -429,7 +435,10 @@ static void volume_sync_delayed_unmute_set(struct mv_userdata *u) {
         u->volume_unmute_time_event = pa_core_rttime_new(u->core, time, volume_sync_delayed_unmute_cb, u);
 }
 
-static pa_hook_result_t volume_sync_cb(pa_core *c, const char *key, struct mv_userdata *u) {
+static pa_hook_result_t volume_sync_cb(void *hook_data, void *call_data, void *slot_data) {
+    const char *key       = call_data;
+    struct mv_userdata *u = slot_data;
+
     pa_sink_input *si;
     uint32_t idx;
     int32_t state;
@@ -497,7 +506,10 @@ static struct mv_volume_steps_set* fallback_new(const char *route, const int cal
     return fallback;
 }
 
-static pa_hook_result_t parameters_changed_cb(pa_core *c, meego_parameter_update_args *ua, struct mv_userdata *u) {
+static pa_hook_result_t parameters_changed_cb(void *hook_data, void *call_data, void *slot_data) {
+    meego_parameter_update_args *ua = call_data;
+    struct mv_userdata *u           = slot_data;
+
     struct mv_volume_steps_set *set;
     pa_proplist *p = NULL;
     bool ret = false;
@@ -588,9 +600,10 @@ static bool step_and_call_values(struct mv_userdata *u,
         return false;
 }
 
-static pa_hook_result_t volume_changing_cb(pa_volume_proxy *r,
-                                           pa_volume_proxy_entry *e,
-                                           struct mv_userdata *u) {
+static pa_hook_result_t volume_changing_cb(void *hook_data, void *call_data, void *slot_data) {
+    pa_volume_proxy_entry *e = call_data;
+    struct mv_userdata *u    = slot_data;
+
     struct mv_volume_steps *steps;
     uint32_t new_step;
     bool call_steps;
@@ -622,9 +635,10 @@ static pa_hook_result_t volume_changing_cb(pa_volume_proxy *r,
     return PA_HOOK_OK;
 }
 
-static pa_hook_result_t volume_changed_cb(pa_volume_proxy *r,
-                                          pa_volume_proxy_entry *e,
-                                          struct mv_userdata *u) {
+static pa_hook_result_t volume_changed_cb(void *hook_data, void *call_data, void *slot_data) {
+    pa_volume_proxy_entry *e = call_data;
+    struct mv_userdata *u    = slot_data;
+
     struct mv_volume_steps *steps;
     uint32_t new_step;
     bool call_steps;
@@ -971,28 +985,28 @@ int pa__init(pa_module *m) {
     setup_notifier(u, notifier_conf);
 
     u->shared = pa_shared_data_get(u->core);
-    u->call_state_hook_slot = pa_shared_data_connect(u->shared, PA_NEMO_PROP_CALL_STATE, (pa_hook_cb_t) call_state_cb, u);
-    u->media_state_hook_slot = pa_shared_data_connect(u->shared, PA_NEMO_PROP_MEDIA_STATE, (pa_hook_cb_t) media_state_cb, u);
+    u->call_state_hook_slot = pa_shared_data_connect(u->shared, PA_NEMO_PROP_CALL_STATE, call_state_cb, u);
+    u->media_state_hook_slot = pa_shared_data_connect(u->shared, PA_NEMO_PROP_MEDIA_STATE, media_state_cb, u);
     u->emergency_call_state_hook_slot = pa_shared_data_connect(u->shared, PA_NEMO_PROP_EMERGENCY_CALL_STATE, emergency_call_state_cb, u);
     if (u->mute_routing)
         u->volume_sync_hook_slot = pa_shared_data_connect(u->shared,
                                                           PA_SAILFISHOS_MEDIA_VOLUME_SYNC,
-                                                          (pa_hook_cb_t) volume_sync_cb, u);
+                                                          volume_sync_cb, u);
     u->prev_state = PA_SAILFISHOS_MEDIA_VOLUME_IN_SYNC;
 
     u->volume_proxy = pa_volume_proxy_get(u->core);
     u->volume_proxy_slot = pa_hook_connect(&pa_volume_proxy_hooks(u->volume_proxy)[PA_VOLUME_PROXY_HOOK_CHANGING],
                                            PA_HOOK_NORMAL,
-                                           (pa_hook_cb_t) volume_changing_cb,
+                                           volume_changing_cb,
                                            u);
     u->volume_proxy_slot = pa_hook_connect(&pa_volume_proxy_hooks(u->volume_proxy)[PA_VOLUME_PROXY_HOOK_CHANGED],
                                            PA_HOOK_NORMAL,
-                                           (pa_hook_cb_t) volume_changed_cb,
+                                           volume_changed_cb,
                                            u);
 
     dbus_init(u);
 
-    meego_parameter_request_updates("mainvolume", (pa_hook_cb_t) parameters_changed_cb, PA_HOOK_EARLY, true, u);
+    meego_parameter_request_updates("mainvolume", parameters_changed_cb, PA_HOOK_EARLY, true, u);
 
     pa_modargs_free(ma);
 
@@ -1013,7 +1027,7 @@ void pa__done(pa_module *m) {
 
     notifier_done(u);
 
-    meego_parameter_stop_updates("mainvolume", (pa_hook_cb_t) parameters_changed_cb, u);
+    meego_parameter_stop_updates("mainvolume", parameters_changed_cb, u);
 
     volume_sync_delayed_unmute_stop(u);
     signal_timer_stop(u);
