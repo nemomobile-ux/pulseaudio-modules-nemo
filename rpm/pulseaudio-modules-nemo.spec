@@ -8,8 +8,8 @@ Summary:    PulseAudio modules for Nemo
 Version:    %{pulsemajorminor}.27
 Release:    1
 Group:      Multimedia/PulseAudio
-License:    LGPLv2.1+
-URL:        https://github.com/nemomobile/pulseaudio-modules-nemo
+License:    LGPLv2+
+URL:        https://git.sailfishos.org/mer-core/pulseaudio-modules-nemo
 Source0:    %{name}-%{version}.tar.gz
 BuildRequires:  pkgconfig(alsa) >= 1.0.19
 BuildRequires:  pkgconfig(check)
@@ -22,7 +22,6 @@ PulseAudio modules for Nemo.
 
 %package common
 Summary:    Common libs for the Nemo PulseAudio modules
-Group:      Multimedia/PulseAudio
 Requires:   pulseaudio >= %{pulseversion}
 Obsoletes:  pulseaudio-modules-nemo-voice < 4.0.6
 Obsoletes:  pulseaudio-modules-nemo-music < 4.0.6
@@ -34,7 +33,6 @@ This contains common libs for the Nemo PulseAudio modules.
 
 %package music
 Summary:    Music module for PulseAudio
-Group:      Multimedia/PulseAudio
 Requires:   %{name}-common = %{version}-%{release}
 Requires:   pulseaudio >= %{pulseversion}
 
@@ -43,7 +41,6 @@ This contains music module for PulseAudio
 
 %package record
 Summary:    Cmtspeech module for PulseAudio
-Group:      Multimedia/PulseAudio
 Requires:   %{name}-common = %{version}-%{release}
 Requires:   pulseaudio >= %{pulseversion}
 
@@ -52,7 +49,6 @@ This contains record module for PulseAudio
 
 %package voice
 Summary:    Voice module for PulseAudio
-Group:      Multimedia/PulseAudio
 Requires:   %{name}-common = %{version}-%{release}
 Requires:   pulseaudio >= %{pulseversion}
 
@@ -61,7 +57,6 @@ This contains voice module for PulseAudio
 
 %package mainvolume
 Summary:    Mainvolume module for PulseAudio
-Group:      Multimedia/PulseAudio
 Requires:   %{name}-common = %{version}-%{release}
 Requires:   %{name}-stream-restore
 Requires:   pulseaudio >= %{pulseversion}
@@ -71,7 +66,6 @@ This contains mainvolume module for PulseAudio
 
 %package parameters
 Summary:    Algorithm parameter manager module for PulseAudio
-Group:      Multimedia/PulseAudio
 Requires:   %{name}-common = %{version}-%{release}
 Requires:   pulseaudio >= %{pulseversion}
 
@@ -80,7 +74,6 @@ This contains an algorithm parameter manager module for PulseAudio
 
 %package sidetone
 Summary:    Sidetone module for PulseAudio
-Group:      Multimedia/PulseAudio
 Requires:   %{name}-common = %{version}-%{release}
 Requires:   pulseaudio >= %{pulseversion}
 
@@ -89,7 +82,6 @@ This contains a sidetone module for PulseAudio
 
 %package test
 Summary:    Test module for PulseAudio
-Group:      Multimedia/PulseAudio
 Requires:   %{name}-common = %{version}-%{release}
 Requires:   pulseaudio >= %{pulseversion}
 
@@ -98,7 +90,6 @@ This contains a test module for PulseAudio
 
 %package stream-restore
 Summary:    Modified version of the original stream-restore module for PulseAudio
-Group:      Multimedia/PulseAudio
 Requires:   %{name}-common = %{version}-%{release}
 Requires:   pulseaudio >= %{pulseversion}
 
@@ -142,6 +133,7 @@ install -m 644 src/common/*.pc %{buildroot}/%{_libdir}/pkgconfig
 %files common
 %defattr(-,root,root,-)
 %{_libdir}/pulse-%{pulsemajorminor}/modules/libmeego-common.so
+%license COPYING
 
 %files music
 %defattr(-,root,root,-)
