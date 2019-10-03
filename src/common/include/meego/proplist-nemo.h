@@ -25,6 +25,7 @@
 #define PA_NEMO_PROP_CALL_STATE                     "x-nemo.voicecall.status"
 #define PA_NEMO_PROP_CALL_STATE_ACTIVE              "active"
 #define PA_NEMO_PROP_CALL_STATE_INACTIVE            "inactive"
+#define PA_NEMO_PROP_CALL_STATE_VOIP_ACTIVE         "voip"
 
 #define PA_NEMO_PROP_MEDIA_STATE                    "x-nemo.media.state"
 #define PA_NEMO_PROP_MEDIA_STATE_INACTIVE           "inactive"
