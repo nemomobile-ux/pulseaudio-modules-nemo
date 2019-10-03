@@ -88,6 +88,7 @@ struct mv_userdata {
     pa_hook_slot *media_state_hook_slot;
     pa_hook_slot *emergency_call_state_hook_slot;
     bool call_active;
+    bool voip_active;
     bool emergency_call_active;
 
     bool mute_routing;
