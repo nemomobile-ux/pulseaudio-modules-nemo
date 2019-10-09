@@ -231,7 +231,7 @@ static void destroy_virtual_stream(struct mv_userdata *u) {
 static void update_virtual_stream(struct mv_userdata *u) {
     pa_assert(u);
 
-    if (u->call_active || u->emergency_call_active)
+    if (!u->voip_active && (u->call_active || u->emergency_call_active))
         create_virtual_stream(u);
     else
         destroy_virtual_stream(u);
@@ -247,12 +247,24 @@ static pa_hook_result_t call_state_cb(void *hook_data, void *call_data, void *sl
     pa_assert(u);
     pa_assert(u->current_steps);
 
-    if ((str = pa_shared_data_gets(u->shared, key)) && pa_streq(str, PA_NEMO_PROP_CALL_STATE_ACTIVE))
-        u->call_active = true;
-    else
+    if ((str = pa_shared_data_gets(u->shared, key))) {
+        if (pa_streq(str, PA_NEMO_PROP_CALL_STATE_ACTIVE)) {
+            u->call_active = true;
+            u->voip_active = false;
+        } else if (pa_streq(str, PA_NEMO_PROP_CALL_STATE_VOIP_ACTIVE)) {
+            u->call_active = true;
+            u->voip_active = true;
+        } else {
+            u->call_active = false;
+            u->voip_active = false;
+        }
+    } else {
         u->call_active = false;
+        u->voip_active = false;
+    }
 
-    pa_log_debug("call is %s (media step %u call step %u)",
+    pa_log_debug("%scall is %s (media step %u call step %u)",
+                 u->voip_active ? "voip " : "",
                  u->call_active ? PA_NEMO_PROP_CALL_STATE_ACTIVE : PA_NEMO_PROP_CALL_STATE_INACTIVE,
                  u->current_steps->media.current_step, u->current_steps->call.current_step);
 
