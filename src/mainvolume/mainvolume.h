@@ -40,6 +40,7 @@
 
 #define MEDIA_STREAM "sink-input-by-media-role:x-maemo"
 #define CALL_STREAM "sink-input-by-media-role:phone"
+#define VOIP_STREAM "sink-input-by-media-role:voip"
 #define MAX_STEPS (64)
 
 typedef enum media_state {
@@ -60,6 +61,7 @@ struct mv_volume_steps_set {
     char *route;
 
     struct mv_volume_steps call;
+    struct mv_volume_steps voip;
     struct mv_volume_steps media;
     bool has_high_volume_step;
     uint32_t high_volume_step;
@@ -170,6 +172,7 @@ void mv_normalize_steps(struct mv_volume_steps *steps);
 bool mv_parse_steps(struct mv_userdata *u,
                     const char *route,
                     const char *step_string_call,
+                    const char *step_string_voip, /* may be NULL, in that case call values are used. */
                     const char *step_string_media,
                     const char *high_volume); /* high_volume can be NULL */
 
