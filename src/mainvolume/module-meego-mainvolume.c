@@ -80,6 +80,7 @@ static void check_notifier(struct mv_userdata *u);
 #define DEFAULT_LISTENING_NOTIFIER_CONF_FILE PA_DEFAULT_CONFIG_DIR PA_PATH_SEP "mainvolume-listening-time-notifier.conf"
 
 #define PROP_CALL_STEPS "x-nemo.mainvolume.call"
+#define PROP_VOIP_STEPS "x-nemo.mainvolume.voip"
 #define PROP_MEDIA_STEPS "x-nemo.mainvolume.media"
 #define PROP_HIGH_VOLUME "x-nemo.mainvolume.high-volume-step"
 
@@ -563,6 +564,7 @@ static pa_hook_result_t parameters_changed_cb(void *hook_data, void *call_data, 
             ret = mv_parse_steps(u,
                                  u->route,
                                  pa_proplist_gets(p, PROP_CALL_STEPS),
+                                 pa_proplist_gets(p, PROP_VOIP_STEPS),
                                  pa_proplist_gets(p, PROP_MEDIA_STEPS),
                                  pa_proplist_gets(p, PROP_HIGH_VOLUME));
 
@@ -602,6 +604,10 @@ static bool step_and_call_values(struct mv_userdata *u,
                                  bool *call_steps) {
     if (pa_streq(name, CALL_STREAM)) {
         *steps = &u->current_steps->call;
+        *call_steps = true;
+        return true;
+    } else if (pa_streq(name, VOIP_STREAM)) {
+        *steps = &u->current_steps->voip;
         *call_steps = true;
         return true;
     } else if (pa_streq(name, MEDIA_STREAM)) {
@@ -1375,6 +1381,15 @@ void mainvolume_get_current_step(DBusConnection *conn, DBusMessage *msg, void *_
     pa_dbus_send_basic_variant_reply(conn, msg, DBUS_TYPE_UINT32, &step);
 }
 
+static const char *active_stream_type(struct mv_userdata *u) {
+    if (u->voip_active)
+        return VOIP_STREAM;
+    else if (u->call_active)
+        return CALL_STREAM;
+
+    return MEDIA_STREAM;
+}
+
 void mainvolume_set_current_step(DBusConnection *conn, DBusMessage *msg, DBusMessageIter *iter, void *_u) {
     struct mv_userdata *u = (struct mv_userdata*)_u;
     struct mv_volume_steps *steps;
@@ -1404,7 +1419,7 @@ void mainvolume_set_current_step(DBusConnection *conn, DBusMessage *msg, DBusMes
     }
 
     if (mv_set_step(u, set_step)) {
-        stream = u->call_active ? CALL_STREAM : MEDIA_STREAM;
+        stream = active_stream_type(u);
         pa_volume_proxy_get_volume(u->volume_proxy, stream, &vol);
         pa_cvolume_set(&vol, vol.channels, mv_current_step_value(u));
         pa_volume_proxy_set_volume(u->volume_proxy, stream, &vol, false);

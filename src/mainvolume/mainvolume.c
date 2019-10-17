@@ -48,7 +48,9 @@ struct mv_volume_steps* mv_active_steps(struct mv_userdata *u) {
     pa_assert(u);
     pa_assert(u->current_steps);
 
-    if (u->call_active || u->emergency_call_active)
+    if (u->voip_active)
+        return &u->current_steps->voip;
+    else if (u->call_active || u->emergency_call_active)
         return &u->current_steps->call;
     else
         return &u->current_steps->media;
@@ -225,48 +227,53 @@ static bool parse_high_volume_step(struct mv_volume_steps_set *set, const char *
     return true;
 }
 
+static bool generate_steps_set(struct mv_volume_steps *steps, const char *step_string) {
+    int32_t steps_mB[MAX_STEPS];
+    uint32_t steps_count;
+
+    steps_count = parse_single_steps(steps_mB, step_string);
+    if (steps_count < 1) {
+        pa_log_warn("failed to parse steps; %s", step_string);
+        return false;
+    }
+    steps->step = pa_xmalloc(sizeof(pa_volume_t) * steps_count);
+    normalize_steps(steps, steps_mB, steps_count);
+
+    return true;
+}
+
 bool mv_parse_steps(struct mv_userdata *u,
                     const char *route,
                     const char *step_string_call,
+                    const char *step_string_voip,
                     const char *step_string_media,
                     const char *high_volume) {
     struct mv_volume_steps_set *set = NULL;
-    int32_t call_steps_mB[MAX_STEPS];
-    int32_t media_steps_mB[MAX_STEPS];
-    uint32_t call_steps_count;
-    uint32_t media_steps_count;
 
     pa_assert(u);
     pa_assert(u->steps);
     pa_assert(route);
 
-    if (!step_string_call || !step_string_media) {
+    if (!step_string_call || !step_string_media)
         goto fail;
-    }
 
     set = pa_xnew0(struct mv_volume_steps_set, 1);
 
-    call_steps_count = parse_single_steps(call_steps_mB, step_string_call);
-    if (call_steps_count < 1) {
-        pa_log_warn("failed to parse call steps; %s", step_string_call);
+    if (!generate_steps_set(&set->call, step_string_call))
         goto fail;
-    }
-    set->call.step = pa_xmalloc(sizeof(pa_volume_t) * call_steps_count);
-    normalize_steps(&set->call, call_steps_mB, call_steps_count);
 
-    media_steps_count = parse_single_steps(media_steps_mB, step_string_media);
-    if (media_steps_count < 1) {
-        pa_log_warn("failed to parse media steps; %s", step_string_media);
+    if (!generate_steps_set(&set->voip, step_string_voip ? step_string_voip : step_string_call))
         goto fail;
-    }
-    set->media.step = pa_xmalloc(sizeof(pa_volume_t) * media_steps_count);
-    normalize_steps(&set->media, media_steps_mB, media_steps_count);
+
+    if (!generate_steps_set(&set->media, step_string_media))
+        goto fail;
 
     set->route = pa_xstrdup(route);
     set->first = true;
 
-    pa_log_debug("adding %d call and %d media steps with route %s",
+    pa_log_debug("adding %d call, %d voip, and %d media steps with route %s",
                  set->call.n_steps,
+                 set->voip.n_steps,
                  set->media.n_steps,
                  set->route);
     if (parse_high_volume_step(set, high_volume, &set->has_high_volume_step, &set->high_volume_step))
@@ -286,6 +293,7 @@ fail:
 uint32_t mv_safe_step(struct mv_userdata *u) {
     pa_assert(u);
     pa_assert(!u->call_active);
+    pa_assert(!u->voip_active);
     pa_assert(u->current_steps);
     pa_assert(u->current_steps->has_high_volume_step);
 
@@ -295,7 +303,7 @@ uint32_t mv_safe_step(struct mv_userdata *u) {
 bool mv_has_high_volume(struct mv_userdata *u) {
     pa_assert(u);
 
-    if (u->call_active || !u->notifier.mode_active)
+    if (u->call_active || u->voip_active || !u->notifier.mode_active)
         return false;
 
     if (u->current_steps && u->current_steps->has_high_volume_step)
@@ -320,7 +328,7 @@ bool mv_notifier_active(struct mv_userdata *u)
 {
     pa_assert(u);
 
-    if (u->notifier.mode_active && u->notifier.enabled_slots && !u->call_active)
+    if (u->notifier.mode_active && u->notifier.enabled_slots && !u->call_active && !u->voip_active)
         return true;
     else
         return false;
