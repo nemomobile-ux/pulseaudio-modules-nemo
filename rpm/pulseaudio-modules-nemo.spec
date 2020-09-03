@@ -14,7 +14,6 @@ Source0:    %{name}-%{version}.tar.gz
 BuildRequires:  pkgconfig(alsa) >= 1.0.19
 BuildRequires:  pkgconfig(check)
 BuildRequires:  pkgconfig(dbus-1)
-BuildRequires:  pkgconfig(libpulse)
 BuildRequires:  pkgconfig(pulsecore)
 BuildRequires:  pulseaudio
 BuildRequires:  libtool-ltdl-devel
