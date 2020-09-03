@@ -111,7 +111,7 @@ This contains development files for nemo modules.
 
 
 %build
-%configure --disable-static
+./bootstrap.sh --disable-static
 make %{?jobs:-j%jobs}
 
 
