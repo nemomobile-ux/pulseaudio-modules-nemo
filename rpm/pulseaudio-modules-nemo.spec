@@ -111,7 +111,7 @@ This contains development files for nemo modules.
 
 
 %build
-%reconfigure --disable-static
+%configure --disable-static
 make %{?jobs:-j%jobs}
 
 
