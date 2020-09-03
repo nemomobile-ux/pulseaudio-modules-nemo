@@ -111,6 +111,7 @@ This contains development files for nemo modules.
 
 
 %build
+echo "%{moduleversion}" > .tarball-version
 ./bootstrap.sh --disable-static
 make %{?jobs:-j%jobs}
 
