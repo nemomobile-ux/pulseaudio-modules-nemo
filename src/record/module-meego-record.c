@@ -142,7 +142,12 @@ static int source_set_state(pa_source *s, pa_source_state_t state) {
     pa_source_assert_ref(s);
     pa_assert_se(u = s->userdata);
 
-    if (PA_SOURCE_IS_LINKED(state) && u->source_output && PA_SOURCE_OUTPUT_IS_LINKED(pa_source_output_get_state(u->source_output))) {
+    if (PA_SOURCE_IS_LINKED(state) && u->source_output &&
+#if (PA_CHECK_VERSION(13,0,0))
+        PA_SOURCE_OUTPUT_IS_LINKED(u->source_output->state)) {
+#else
+        PA_SOURCE_OUTPUT_IS_LINKED(pa_source_output_get_state(u->source_output))) {
+#endif
         pa_source_output_cork(u->source_output, state == PA_SOURCE_SUSPENDED);
     }
 

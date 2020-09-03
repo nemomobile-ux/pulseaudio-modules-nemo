@@ -817,9 +817,15 @@ static void voice_hw_sink_input_reinit_defer_cb(pa_mainloop_api *m, pa_defer_eve
     pa_xfree(d);
     d = NULL;
 
+#if (PA_CHECK_VERSION(13,0,0))
+    start_uncorked = PA_SINK_IS_OPENED(u->raw_sink->state) ||
+        PA_SINK_IS_OPENED(u->voip_sink->state) ||
+        old_si->state != PA_SINK_INPUT_CORKED;
+#else
     start_uncorked = PA_SINK_IS_OPENED(pa_sink_get_state(u->raw_sink)) ||
         PA_SINK_IS_OPENED(pa_sink_get_state(u->voip_sink)) ||
         pa_sink_input_get_state(old_si) != PA_SINK_INPUT_CORKED;
+#endif
     pa_log("HWSI START UNCORKED: %d", start_uncorked);
 
     new_si = voice_hw_sink_input_new(u, start_uncorked ? 0 : PA_SINK_INPUT_START_CORKED);

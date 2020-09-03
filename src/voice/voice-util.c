@@ -186,16 +186,32 @@ int voice_source_set_state(pa_source *s, pa_source *other, pa_source_state_t sta
     pa_source_assert_ref(other);
 
     if (u->hw_source_output) {
+#if (PA_CHECK_VERSION(13,0,0))
+        if (u->hw_source_output->state == PA_SOURCE_OUTPUT_RUNNING) {
+#else
         if (pa_source_output_get_state(u->hw_source_output) == PA_SOURCE_OUTPUT_RUNNING) {
+#endif
             if (state == PA_SOURCE_SUSPENDED &&
+#if (PA_CHECK_VERSION(13,0,0))
+                other->state == PA_SOURCE_SUSPENDED) {
+#else
                 pa_source_get_state(other) == PA_SOURCE_SUSPENDED) {
+#endif
                 pa_source_output_cork(u->hw_source_output, true);
                 pa_log_debug("hw_source_output corked");
             }
         }
+#if (PA_CHECK_VERSION(13,0,0))
+        else if (u->hw_source_output->state == PA_SOURCE_OUTPUT_CORKED) {
+#else
         else if (pa_source_output_get_state(u->hw_source_output) == PA_SOURCE_OUTPUT_CORKED) {
+#endif
             if (PA_SOURCE_IS_OPENED(state) ||
+#if (PA_CHECK_VERSION(13,0,0))
+                PA_SOURCE_IS_OPENED(other->state)) {
+#else
                 PA_SOURCE_IS_OPENED(pa_source_get_state(other))) {
+#endif
                 pa_source_output_cork(u->hw_source_output, false);
                 pa_log_debug("hw_source_output uncorked");
             }
@@ -219,17 +235,28 @@ int voice_sink_set_state(pa_sink *s, pa_sink *other, pa_sink_state_t state) {
     pa_sink_assert_ref(other);
     om_sink = voice_get_original_master_sink(u);
 
+#if (PA_CHECK_VERSION(13,0,0))
+    if (u->hw_sink_input && PA_SINK_INPUT_IS_LINKED(u->hw_sink_input->state)) {
+        if (u->hw_sink_input->state == PA_SINK_INPUT_CORKED) {
+            if (PA_SINK_IS_OPENED(state) ||
+                PA_SINK_IS_OPENED(other->state)) {
+#else
     if (u->hw_sink_input && PA_SINK_INPUT_IS_LINKED(pa_sink_input_get_state(u->hw_sink_input))) {
         if (pa_sink_input_get_state(u->hw_sink_input) == PA_SINK_INPUT_CORKED) {
             if (PA_SINK_IS_OPENED(state) ||
                 PA_SINK_IS_OPENED(pa_sink_get_state(other))) {
+#endif
                 pa_sink_input_cork(u->hw_sink_input, false);
                 pa_log_debug("hw_sink_input uncorked");
             }
         }
         else {
             if (state == PA_SINK_SUSPENDED &&
+#if (PA_CHECK_VERSION(13,0,0))
+                other->state == PA_SINK_SUSPENDED) {
+#else
                 pa_sink_get_state(other) == PA_SINK_SUSPENDED) {
+#endif
                 pa_sink_input_cork(u->hw_sink_input, true);
                 pa_log_debug("hw_sink_input corked");
             }

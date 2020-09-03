@@ -164,7 +164,11 @@ static int sink_set_state(pa_sink *s, pa_sink_state_t state) {
     pa_sink_assert_ref(s);
     pa_assert_se(u = s->userdata);
 
+#if (PA_CHECK_VERSION(13,0,0))
+    if (PA_SINK_IS_LINKED(state) && u->sink_input && PA_SINK_INPUT_IS_LINKED(u->sink_input->state))
+#else
     if (PA_SINK_IS_LINKED(state) && u->sink_input && PA_SINK_INPUT_IS_LINKED(pa_sink_input_get_state(u->sink_input)))
+#endif
         pa_sink_input_cork(u->sink_input, state == PA_SINK_SUSPENDED);
 
     pa_log_debug("sink_set_state() called with %d", state);

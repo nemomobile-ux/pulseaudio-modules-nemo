@@ -771,7 +771,11 @@ static pa_hook_result_t sink_input_put_cb(pa_core *c, pa_object *o, struct mv_us
         goto end;
     }
 
+#if (PA_CHECK_VERSION(13,0,0))
+    state = si->state;
+#else
     state = pa_sink_input_get_state(si);
+#endif
     if (state == PA_SINK_INPUT_DRAINED ||
         state == PA_SINK_INPUT_RUNNING)
         u->notifier.enabled_slots |= slot;
@@ -799,7 +803,11 @@ static pa_hook_result_t sink_input_state_changed_cb(pa_core *c, pa_object *o, st
 
     slot = PA_PTR_TO_UINT32(slot_ptr);
 
+#if (PA_CHECK_VERSION(13,0,0))
+    state = si->state;
+#else
     state = pa_sink_input_get_state(si);
+#endif
     if (state == PA_SINK_INPUT_DRAINED ||
         state == PA_SINK_INPUT_RUNNING)
         u->notifier.enabled_slots |= slot;

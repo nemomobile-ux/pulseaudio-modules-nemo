@@ -114,10 +114,18 @@ static void master_source_state_subscribe_cb(pa_core *c, pa_subscription_event_t
     if (u->master_source != pa_idxset_get_by_index(c->sources, idx))
         return;
 
+#if (PA_CHECK_VERSION(13,0,0))
+    if (u->master_source->state == u->previous_master_source_state)
+#else
     if (pa_source_get_state(u->master_source) == u->previous_master_source_state)
+#endif
         return;
 
+#if (PA_CHECK_VERSION(13,0,0))
+    u->previous_master_source_state = u->master_source->state;
+#else
     u->previous_master_source_state = pa_source_get_state(u->master_source);
+#endif
 
     if (u->previous_master_source_state == PA_SOURCE_SUSPENDED) {
         meego_algorithm_hook_fire(u->hooks[HOOK_SOURCE_RESET], NULL);
@@ -360,7 +368,11 @@ int pa__init(pa_module*m) {
 
     u->sink_subscription = pa_subscription_new(m->core, PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SINK_INPUT, master_sink_volume_subscribe_cb, u);
 
+#if (PA_CHECK_VERSION(13,0,0))
+    u->previous_master_source_state = u->master_source->state;
+#else
     u->previous_master_source_state = pa_source_get_state(u->master_source);
+#endif
     u->source_change_subscription = pa_subscription_new(m->core, PA_SUBSCRIPTION_MASK_SOURCE, master_source_state_subscribe_cb, u);
     return 0;
 

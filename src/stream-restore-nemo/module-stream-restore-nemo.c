@@ -2334,7 +2334,11 @@ static pa_hook_result_t sink_input_new_hook_callback(pa_core *c, pa_sink_input_n
         /* It might happen that a stream and a sink are set up at the
            same time, in which case we want to make sure we don't
            interfere with that */
+#if (PA_CHECK_VERSION(13,0,0))
+        if (s && PA_SINK_IS_LINKED(s->state))
+#else
         if (s && PA_SINK_IS_LINKED(pa_sink_get_state(s)))
+#endif
 #if PULSEAUDIO_VERSION >= 12
             if (pa_sink_input_new_data_set_sink(new_data, s, true, false))
 #else
@@ -2439,7 +2443,11 @@ static pa_hook_result_t source_output_new_hook_callback(pa_core *c, pa_source_ou
         /* It might happen that a stream and a sink are set up at the
            same time, in which case we want to make sure we don't
            interfere with that */
+#if (PA_CHECK_VERSION(13,0,0))
+        if (s && PA_SOURCE_IS_LINKED(s->state)) {
+#else
         if (s && PA_SOURCE_IS_LINKED(pa_source_get_state(s))) {
+#endif
             pa_log_info("Restoring device for stream %s.", name);
 #if PULSEAUDIO_VERSION >= 12
             pa_source_output_new_data_set_source(new_data, s, true, false);
@@ -2534,7 +2542,11 @@ static pa_hook_result_t sink_put_hook_callback(pa_core *c, pa_sink *sink, struct
         /* It might happen that a stream and a sink are set up at the
            same time, in which case we want to make sure we don't
            interfere with that */
+#if (PA_CHECK_VERSION(13,0,0))
+        if (!PA_SINK_INPUT_IS_LINKED(si->state))
+#else
         if (!PA_SINK_INPUT_IS_LINKED(pa_sink_input_get_state(si)))
+#endif
             continue;
 
         if (!(name = pa_proplist_get_stream_group(si->proplist, "sink-input", IDENTIFICATION_PROPERTY)))
@@ -2582,7 +2594,11 @@ static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source *source, 
         /* It might happen that a stream and a source are set up at the
            same time, in which case we want to make sure we don't
            interfere with that */
+#if (PA_CHECK_VERSION(13,0,0))
+        if (!PA_SOURCE_OUTPUT_IS_LINKED(so->state))
+#else
         if (!PA_SOURCE_OUTPUT_IS_LINKED(pa_source_output_get_state(so)))
+#endif
             continue;
 
         if (!(name = pa_proplist_get_stream_group(so->proplist, "source-output", IDENTIFICATION_PROPERTY)))
@@ -2631,7 +2647,11 @@ static pa_hook_result_t sink_unlink_hook_callback(pa_core *c, pa_sink *sink, str
 
                 if ((d = pa_namereg_get(c, e->device, PA_NAMEREG_SINK)) &&
                     d != sink &&
+#if (PA_CHECK_VERSION(13,0,0))
+                    PA_SINK_IS_LINKED(d->state))
+#else
                     PA_SINK_IS_LINKED(pa_sink_get_state(d)))
+#endif
                     pa_sink_input_move_to(si, d, true);
             }
 
@@ -2677,7 +2697,11 @@ static pa_hook_result_t source_unlink_hook_callback(pa_core *c, pa_source *sourc
 
                 if ((d = pa_namereg_get(c, e->device, PA_NAMEREG_SOURCE)) &&
                     d != source &&
+#if (PA_CHECK_VERSION(13,0,0))
+                    PA_SOURCE_IS_LINKED(d->state))
+#else
                     PA_SOURCE_IS_LINKED(pa_source_get_state(d)))
+#endif
                     pa_source_output_move_to(so, d, true);
             }
 
