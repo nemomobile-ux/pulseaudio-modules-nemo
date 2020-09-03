@@ -5,7 +5,7 @@
 Name:       pulseaudio-modules-nemo
 
 Summary:    PulseAudio modules for Nemo
-Version:    %{pulsemajorminor}.30
+Version:    12.2.30
 Release:    1
 Group:      Multimedia/PulseAudio
 License:    LGPLv2+
@@ -111,7 +111,6 @@ This contains development files for nemo modules.
 
 
 %build
-echo "%{moduleversion}" > .tarball-version
 %reconfigure --disable-static
 make %{?jobs:-j%jobs}
 
