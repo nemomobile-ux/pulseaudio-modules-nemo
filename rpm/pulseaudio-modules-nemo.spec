@@ -1,4 +1,4 @@
-%define pulseversion %{expand:%(rpm -q --qf [\%\{version\}] pulseaudio)}
+%define pulseversion %{expand:%(rpm -q --qf '[%%{version}]' pulseaudio)}
 %define pulsemajorminor %{expand:%(echo '%{pulseversion}' | cut -d+ -f1)}
 %define moduleversion %{pulsemajorminor}.%{expand:%(echo '%{version}' | awk -F. '{print $NF}')}
 
@@ -15,6 +15,7 @@ BuildRequires:  pkgconfig(alsa) >= 1.0.19
 BuildRequires:  pkgconfig(check)
 BuildRequires:  pkgconfig(dbus-1)
 BuildRequires:  pkgconfig(libpulse)
+BuildRequires:  pulseaudio
 BuildRequires:  libtool-ltdl-devel
 
 %description
