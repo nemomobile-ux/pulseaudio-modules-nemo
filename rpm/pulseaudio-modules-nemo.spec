@@ -1,6 +1,6 @@
 %define pulseversion %{expand:%(rpm -q --qf '[%%{version}]' pulseaudio)}
 %define pulsemajorminor %{expand:%(echo '%{pulseversion}' | cut -d+ -f1)}
-%define moduleversion %{pulsemajorminor}.%{expand:%(echo '%{version}' | cut -d. -f3)}
+%define moduleversion %{pulsemajorminor}.%{expand:%(echo '%{version}' | awk -F. '{print $NF}')}
 
 Name:       pulseaudio-modules-nemo
 
@@ -14,7 +14,7 @@ Source0:    %{name}-%{version}.tar.gz
 BuildRequires:  pkgconfig(alsa) >= 1.0.19
 BuildRequires:  pkgconfig(check)
 BuildRequires:  pkgconfig(dbus-1)
-BuildRequires:  pkgconfig(pulsecore) >= %{pulsemajorminor}
+BuildRequires:  pkgconfig(libpulse)
 BuildRequires:  libtool-ltdl-devel
 
 %description
