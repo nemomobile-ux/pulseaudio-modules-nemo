@@ -25,7 +25,7 @@
 #include <config.h>
 #endif
 
-#include <asoundlib.h>
+#include <alsa/asoundlib.h>
 
 #include <pulsecore/log.h>
 #include <pulsecore/macro.h>

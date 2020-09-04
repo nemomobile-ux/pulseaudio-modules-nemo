@@ -23,7 +23,7 @@
 #ifndef foosidetoneargshfoo
 #define foosidetoneargshfoo
 
-#include <asoundlib.h>
+#include <alsa/asoundlib.h>
 
 #include <pulsecore/modargs.h>
 #include "sidetone.h"

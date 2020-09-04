@@ -26,7 +26,7 @@
 
 #include <pulsecore/macro.h>
 #include <pulse/xmalloc.h>
-#include <asoundlib.h>
+#include <alsa/asoundlib.h>
 #include "alsa-utils.h"
 #include "ctrl-element.h"
 

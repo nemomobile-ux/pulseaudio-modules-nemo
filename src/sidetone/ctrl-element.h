@@ -23,7 +23,7 @@
 #ifndef fooctrlelementhfoo
 #define fooctrlelementhfoo
 
-#include <asoundlib.h>
+#include <alsa/asoundlib.h>
 
 typedef struct ctrl_element ctrl_element;
 
