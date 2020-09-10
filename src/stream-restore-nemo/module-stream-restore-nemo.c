@@ -2162,6 +2162,11 @@ static void subscribe_callback(pa_core *c, pa_subscription_event_type_t t, uint3
         if (!(sink_input = pa_idxset_get_by_index(c->sink_inputs, idx)))
             return;
 
+        /* Ignore this sink input if it is connecting a filter sink to
+         * the master */
+        if (sink_input->origin_sink)
+            return;
+
         if (!(name = pa_proplist_get_stream_group(sink_input->proplist, "sink-input", IDENTIFICATION_PROPERTY)))
             return;
 
@@ -2191,25 +2196,35 @@ static void subscribe_callback(pa_core *c, pa_subscription_event_type_t t, uint3
             mute_updated = !created_new_entry && (!old->muted_valid || entry->muted != old->muted);
         }
 
-        if (sink_input->save_sink) {
-            pa_xfree(entry->device);
-            entry->device = pa_xstrdup(sink_input->sink->name);
-            entry->device_valid = true;
+        if (sink_input->preferred_sink != NULL || !created_new_entry) {
+            pa_sink *s = NULL;
 
-            device_updated = !created_new_entry && (!old->device_valid || !pa_streq(entry->device, old->device));
-            if (sink_input->sink->card) {
-                pa_xfree(entry->card);
-                entry->card = pa_xstrdup(sink_input->sink->card->name);
+            pa_xfree(entry->device);
+            entry->device = pa_xstrdup(sink_input->preferred_sink);
+            entry->device_valid = true;
+            if (!entry->device)
+                entry->device_valid = false;
+
+            device_updated = !created_new_entry && !pa_safe_streq(entry->device, old->device);
+            pa_xfree(entry->card);
+            entry->card = NULL;
+            entry->card_valid = false;
+            if (entry->device_valid && (s = pa_namereg_get(c, entry->device, PA_NAMEREG_SINK)) && s->card) {
+                entry->card = pa_xstrdup(s->card->name);
                 entry->card_valid = true;
             }
         }
-
     } else {
         pa_source_output *source_output;
 
         pa_assert((t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) == PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT);
 
         if (!(source_output = pa_idxset_get_by_index(c->source_outputs, idx)))
+            return;
+
+        /* Ignore this source output if it is connecting a filter source to
+         * the master */
+        if (source_output->destination_source)
             return;
 
         if (!(name = pa_proplist_get_stream_group(source_output->proplist, "source-output", IDENTIFICATION_PROPERTY)))
@@ -2241,16 +2256,22 @@ static void subscribe_callback(pa_core *c, pa_subscription_event_type_t t, uint3
             mute_updated = !created_new_entry && (!old->muted_valid || entry->muted != old->muted);
         }
 
-        if (source_output->save_source) {
+        if (source_output->preferred_source != NULL || !created_new_entry) {
+            pa_source *s = NULL;
+
             pa_xfree(entry->device);
-            entry->device = pa_xstrdup(source_output->source->name);
+            entry->device = pa_xstrdup(source_output->preferred_source);
             entry->device_valid = true;
 
-            device_updated = !created_new_entry && (!old->device_valid || !pa_streq(entry->device, old->device));
+            if (!entry->device)
+                entry->device_valid = false;
 
-            if (source_output->source->card) {
-                pa_xfree(entry->card);
-                entry->card = pa_xstrdup(source_output->source->card->name);
+            device_updated = !created_new_entry && !pa_safe_streq(entry->device, old->device);
+            pa_xfree(entry->card);
+            entry->card = NULL;
+            entry->card_valid = false;
+            if (entry->device_valid && (s = pa_namereg_get(c, entry->device, PA_NAMEREG_SOURCE)) && s->card) {
+                entry->card = pa_xstrdup(s->card->name);
                 entry->card_valid = true;
             }
         }
