@@ -131,8 +131,8 @@ struct userdata {
         *sink_input_fixate_hook_slot,
         *source_output_new_hook_slot,
         *source_output_fixate_hook_slot,
-        *sink_put_hook_slot,
-        *source_put_hook_slot,
+        /* *sink_put_hook_slot, */
+        /* *source_put_hook_slot, */
         *sink_unlink_hook_slot,
         *source_unlink_hook_slot,
         *connection_unlink_hook_slot;
@@ -2536,107 +2536,107 @@ static pa_hook_result_t source_output_fixate_hook_callback(pa_core *c, pa_source
     return PA_HOOK_OK;
 }
 
-static pa_hook_result_t sink_put_hook_callback(pa_core *c, pa_sink *sink, struct userdata *u) {
-    pa_sink_input *si;
-    uint32_t idx;
+/* static pa_hook_result_t sink_put_hook_callback(pa_core *c, pa_sink *sink, struct userdata *u) { */
+/*     pa_sink_input *si; */
+/*     uint32_t idx; */
 
-    pa_assert(c);
-    pa_assert(sink);
-    pa_assert(u);
-    pa_assert(u->on_hotplug && u->restore_device);
+/*     pa_assert(c); */
+/*     pa_assert(sink); */
+/*     pa_assert(u); */
+/*     pa_assert(u->on_hotplug && u->restore_device); */
 
-    PA_IDXSET_FOREACH(si, c->sink_inputs, idx) {
-        char *name;
-        struct entry *e;
+/*     PA_IDXSET_FOREACH(si, c->sink_inputs, idx) { */
+/*         char *name; */
+/*         struct entry *e; */
 
-        if (si->sink == sink)
-            continue;
+/*         if (si->sink == sink) */
+/*             continue; */
 
-        if (si->save_sink)
-            continue;
+/*         if (si->save_sink) */
+/*             continue; */
 
-        /* Skip this if it is already in the process of being moved
-         * anyway */
-        if (!si->sink)
-            continue;
+/*         /\* Skip this if it is already in the process of being moved */
+/*          * anyway *\/ */
+/*         if (!si->sink) */
+/*             continue; */
 
-        /* It might happen that a stream and a sink are set up at the
-           same time, in which case we want to make sure we don't
-           interfere with that */
-#if (PA_CHECK_VERSION(13,0,0))
-        if (!PA_SINK_INPUT_IS_LINKED(si->state))
-#else
-        if (!PA_SINK_INPUT_IS_LINKED(pa_sink_input_get_state(si)))
-#endif
-            continue;
+/*         /\* It might happen that a stream and a sink are set up at the */
+/*            same time, in which case we want to make sure we don't */
+/*            interfere with that *\/ */
+/* #if (PA_CHECK_VERSION(13,0,0)) */
+/*         if (!PA_SINK_INPUT_IS_LINKED(si->state)) */
+/* #else */
+/*         if (!PA_SINK_INPUT_IS_LINKED(pa_sink_input_get_state(si))) */
+/* #endif */
+/*             continue; */
 
-        if (!(name = pa_proplist_get_stream_group(si->proplist, "sink-input", IDENTIFICATION_PROPERTY)))
-            continue;
+/*         if (!(name = pa_proplist_get_stream_group(si->proplist, "sink-input", IDENTIFICATION_PROPERTY))) */
+/*             continue; */
 
-        if ((e = entry_read(u, name))) {
-            if (e->device_valid && pa_streq(e->device, sink->name))
-                pa_sink_input_move_to(si, sink, true);
+/*         if ((e = entry_read(u, name))) { */
+/*             if (e->device_valid && pa_streq(e->device, sink->name)) */
+/*                 pa_sink_input_move_to(si, sink, true); */
 
-            entry_free(e);
-        }
+/*             entry_free(e); */
+/*         } */
 
-        pa_xfree(name);
-    }
+/*         pa_xfree(name); */
+/*     } */
 
-    return PA_HOOK_OK;
-}
+/*     return PA_HOOK_OK; */
+/* } */
 
-static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source *source, struct userdata *u) {
-    pa_source_output *so;
-    uint32_t idx;
+/* static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source *source, struct userdata *u) { */
+/*     pa_source_output *so; */
+/*     uint32_t idx; */
 
-    pa_assert(c);
-    pa_assert(source);
-    pa_assert(u);
-    pa_assert(u->on_hotplug && u->restore_device);
+/*     pa_assert(c); */
+/*     pa_assert(source); */
+/*     pa_assert(u); */
+/*     pa_assert(u->on_hotplug && u->restore_device); */
 
-    PA_IDXSET_FOREACH(so, c->source_outputs, idx) {
-        char *name;
-        struct entry *e;
+/*     PA_IDXSET_FOREACH(so, c->source_outputs, idx) { */
+/*         char *name; */
+/*         struct entry *e; */
 
-        if (so->source == source)
-            continue;
+/*         if (so->source == source) */
+/*             continue; */
 
-        if (so->save_source)
-            continue;
+/*         if (so->save_source) */
+/*             continue; */
 
-        if (so->direct_on_input)
-            continue;
+/*         if (so->direct_on_input) */
+/*             continue; */
 
-        /* Skip this if it is already in the process of being moved anyway */
-        if (!so->source)
-            continue;
+/*         /\* Skip this if it is already in the process of being moved anyway *\/ */
+/*         if (!so->source) */
+/*             continue; */
 
-        /* It might happen that a stream and a source are set up at the
-           same time, in which case we want to make sure we don't
-           interfere with that */
-#if (PA_CHECK_VERSION(13,0,0))
-        if (!PA_SOURCE_OUTPUT_IS_LINKED(so->state))
-#else
-        if (!PA_SOURCE_OUTPUT_IS_LINKED(pa_source_output_get_state(so)))
-#endif
-            continue;
+/*         /\* It might happen that a stream and a source are set up at the */
+/*            same time, in which case we want to make sure we don't */
+/*            interfere with that *\/ */
+/* #if (PA_CHECK_VERSION(13,0,0)) */
+/*         if (!PA_SOURCE_OUTPUT_IS_LINKED(so->state)) */
+/* #else */
+/*         if (!PA_SOURCE_OUTPUT_IS_LINKED(pa_source_output_get_state(so))) */
+/* #endif */
+/*             continue; */
 
-        if (!(name = pa_proplist_get_stream_group(so->proplist, "source-output", IDENTIFICATION_PROPERTY)))
-            continue;
+/*         if (!(name = pa_proplist_get_stream_group(so->proplist, "source-output", IDENTIFICATION_PROPERTY))) */
+/*             continue; */
 
-        if ((e = entry_read(u, name))) {
-            if (e->device_valid && pa_streq(e->device, source->name))
-                pa_source_output_move_to(so, source, true);
+/*         if ((e = entry_read(u, name))) { */
+/*             if (e->device_valid && pa_streq(e->device, source->name)) */
+/*                 pa_source_output_move_to(so, source, true); */
 
-            entry_free(e);
-        }
+/*             entry_free(e); */
+/*         } */
 
-        pa_xfree(name);
-    }
+/*         pa_xfree(name); */
+/*     } */
 
-    return PA_HOOK_OK;
-}
+/*     return PA_HOOK_OK; */
+/* } */
 
 static pa_hook_result_t sink_unlink_hook_callback(pa_core *c, pa_sink *sink, struct userdata *u) {
     pa_sink_input *si;
@@ -3399,11 +3399,11 @@ int pa__init(pa_module*m) {
         u->source_output_new_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_NEW], PA_HOOK_EARLY, (pa_hook_cb_t) source_output_new_hook_callback, u);
     }
 
-    if (restore_device && on_hotplug) {
-        /* A little bit earlier than module-intended-roles ... */
-        u->sink_put_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_PUT], PA_HOOK_LATE, (pa_hook_cb_t) sink_put_hook_callback, u);
-        u->source_put_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_PUT], PA_HOOK_LATE, (pa_hook_cb_t) source_put_hook_callback, u);
-    }
+    /* if (restore_device && on_hotplug) { */
+    /*     /\* A little bit earlier than module-intended-roles ... *\/ */
+    /*     u->sink_put_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_PUT], PA_HOOK_LATE, (pa_hook_cb_t) sink_put_hook_callback, u); */
+    /*     u->source_put_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_PUT], PA_HOOK_LATE, (pa_hook_cb_t) source_put_hook_callback, u); */
+    /* } */
 
     if (restore_device && on_rescue) {
         /* A little bit earlier than module-intended-roles, module-rescue-streams, ... */
@@ -3550,10 +3550,10 @@ void pa__done(pa_module*m) {
     if (u->sink_input_move_finished_slot)
         pa_hook_slot_free(u->sink_input_move_finished_slot);
 
-    if (u->sink_put_hook_slot)
-        pa_hook_slot_free(u->sink_put_hook_slot);
-    if (u->source_put_hook_slot)
-        pa_hook_slot_free(u->source_put_hook_slot);
+    /* if (u->sink_put_hook_slot) */
+    /*     pa_hook_slot_free(u->sink_put_hook_slot); */
+    /* if (u->source_put_hook_slot) */
+    /*     pa_hook_slot_free(u->source_put_hook_slot); */
 
     if (u->sink_unlink_hook_slot)
         pa_hook_slot_free(u->sink_unlink_hook_slot);
