@@ -113,7 +113,7 @@ This contains development files for nemo modules.
 
 %build
 echo "%{moduleversion}" > .tarball-version
-./bootstrap.sh --disable-static
+./bootstrap.sh --disable-static --prefix=%{_prefix}
 make %{?jobs:-j%jobs}
 
 
@@ -121,7 +121,7 @@ make %{?jobs:-j%jobs}
 rm -rf %{buildroot}
 %make_install
 
-rm %{buildroot}/%{_prefix}/lib*/pulse-*/modules/*.la
+rm -f %{buildroot}/%{_prefix}/lib*/pulse-*/modules/*.la
 
 install -d %{buildroot}/%{_prefix}/include/pulsecore/modules/meego
 install -m 644 src/common/include/meego/*.h %{buildroot}/%{_prefix}/include/pulsecore/modules/meego
