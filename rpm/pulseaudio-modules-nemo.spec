@@ -1,5 +1,5 @@
 %define pulseversion %{expand:%(rpm -q --qf '[%%{version}]' pulseaudio)}
-%define pulsemajorminor %{expand:%(echo '%{pulseversion}' | cut -d+ -f1)}
+%define pulsemajorminor %{expand:%(echo '%{pulseversion}' | cut -d. -f1-2)}
 %define moduleversion %{pulsemajorminor}.%{expand:%(echo '%{version}' | awk -F. '{print $NF}')}
 
 Name:       pulseaudio-modules-nemo
@@ -120,6 +120,8 @@ make %{?jobs:-j%jobs}
 %install
 rm -rf %{buildroot}
 %make_install
+
+rm %{buildroot}/%{_prefix}/lib*/pulse-*/modules/*.la
 
 install -d %{buildroot}/%{_prefix}/include/pulsecore/modules/meego
 install -m 644 src/common/include/meego/*.h %{buildroot}/%{_prefix}/include/pulsecore/modules/meego
