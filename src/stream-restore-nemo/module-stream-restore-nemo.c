@@ -2835,7 +2835,6 @@ static void entry_apply(struct userdata *u, const char *name, struct entry *e) {
         if (u->restore_volume && e->volume_valid && si->volume_writable) {
             pa_cvolume v;
 
-            pa_log_info("Restoring volume for sink input %s. c %d vol %d", name, e->channel_map.channels, e->volume.values[0]);
             v = e->volume;
             pa_log_info("Restoring volume for sink input %s.", name);
             pa_cvolume_remap(&v, &e->channel_map, &si->channel_map);
@@ -2849,21 +2848,16 @@ static void entry_apply(struct userdata *u, const char *name, struct entry *e) {
 
         if (u->restore_device) {
             if (!e->device_valid) {
-                if (si->save_sink) {
+                if (si->preferred_sink != NULL) {
                     pa_log_info("Ensuring device is not saved for stream %s.", name);
                     /* If the device is not valid we should make sure the
-                       save flag is cleared as the user may have specifically
+                       preferred_sink is cleared as the user may have specifically
                        removed the sink element from the rule. */
-                    si->save_sink = false;
-                    /* This is cheating a bit. The sink input itself has not changed
-                       but the rules governing its routing have, so we fire this event
-                       such that other routing modules (e.g. module-device-manager)
-                       will pick up the change and reapply their routing */
-                    pa_subscription_post(si->core, PA_SUBSCRIPTION_EVENT_SINK_INPUT|PA_SUBSCRIPTION_EVENT_CHANGE, si->index);
+                    pa_sink_input_set_preferred_sink(si, NULL);
                 }
             } else if ((s = pa_namereg_get(u->core, e->device, PA_NAMEREG_SINK))) {
                 pa_log_info("Restoring device for stream %s.", name);
-                pa_sink_input_move_to(si, s, true);
+                pa_sink_input_set_preferred_sink(si, s);
             }
         }
     }
@@ -2897,21 +2891,16 @@ static void entry_apply(struct userdata *u, const char *name, struct entry *e) {
 
         if (u->restore_device) {
             if (!e->device_valid) {
-                if (so->save_source) {
+                if (so->preferred_source != NULL) {
                     pa_log_info("Ensuring device is not saved for stream %s.", name);
                     /* If the device is not valid we should make sure the
-                       save flag is cleared as the user may have specifically
+                       preferred_source is cleared as the user may have specifically
                        removed the source element from the rule. */
-                    so->save_source = false;
-                    /* This is cheating a bit. The source output itself has not changed
-                       but the rules governing its routing have, so we fire this event
-                       such that other routing modules (e.g. module-device-manager)
-                       will pick up the change and reapply their routing */
-                    pa_subscription_post(so->core, PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT|PA_SUBSCRIPTION_EVENT_CHANGE, so->index);
+                    pa_source_output_set_preferred_source(so, NULL);
                 }
             } else if ((s = pa_namereg_get(u->core, e->device, PA_NAMEREG_SOURCE))) {
                 pa_log_info("Restoring device for stream %s.", name);
-                pa_source_output_move_to(so, s, true);
+                pa_source_output_set_preferred_source(so, s);
             }
         }
     }
