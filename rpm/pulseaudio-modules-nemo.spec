@@ -113,7 +113,7 @@ This contains development files for nemo modules.
 
 %build
 echo "%{moduleversion}" > .tarball-version
-./bootstrap.sh --disable-static --prefix=%{_prefix}
+./bootstrap.sh --disable-static --prefix=%{_prefix} --libdir=%{_libdir}
 make %{?jobs:-j%jobs}
 
 
