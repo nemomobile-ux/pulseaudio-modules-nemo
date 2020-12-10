@@ -174,7 +174,7 @@ static void test_cork(struct userdata *u, pa_modargs *ma, bool corked) {
         if (!(si = pa_idxset_get_by_index(u->core->sink_inputs, idx)))
             pa_log_error("no sink-input found with idx %u", idx);
         else
-            pa_sink_input_cork(si, corked);
+            pa_sink_input_send_event(si, corked ? PA_STREAM_EVENT_REQUEST_CORK : PA_STREAM_EVENT_REQUEST_UNCORK, NULL);
     }
 
 }
