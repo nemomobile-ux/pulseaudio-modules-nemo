@@ -38,8 +38,6 @@
 #include <pulsecore/atomic.h>
 #include <pulsecore/thread.h>
 
-#include "module-meego-record-symdef.h"
-
 #include "proplist-meego.h"
 #include "pa-optimized.h"
 #include "memory.h"

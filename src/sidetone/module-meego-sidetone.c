@@ -27,7 +27,6 @@
 #include <pulsecore/module.h>
 #include "parameter-hook.h"
 
-#include "module-meego-sidetone-symdef.h"
 #include "sidetone.h"
 #include "sidetone-args.h"
 

@@ -42,8 +42,6 @@
 #include <pulsecore/thread.h>
 #include <pulsecore/sample-util.h>
 
-#include "module-meego-music-symdef.h"
-
 #include "proplist-meego.h"
 #include "algorithm-hook.h"
 #include "optimized.h"
