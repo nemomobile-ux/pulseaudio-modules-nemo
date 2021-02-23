@@ -1362,7 +1362,6 @@ static bool ext_entry_has_volume_changed(struct entry *a, struct entry *b) {
 
 static void ext_apply_route_volume(struct userdata *u, struct ext_route_volume *r, bool apply) {
     struct entry *old;
-    pa_datum key, data;
     struct entry *entry = NULL;
     struct dbus_entry *de = NULL;
 
@@ -1387,12 +1386,6 @@ static void ext_apply_route_volume(struct userdata *u, struct ext_route_volume *
         return;
     }
     entry_free(old);
-
-    key.data = (void*) r->name;
-    key.size = (int)strlen(r->name);
-
-    data.data = (void*) entry;
-    data.size = sizeof(struct entry);
 
     pa_log_info("Updating route %s volume/mute/device for stream %s.", u->route, r->name);
     entry_write(u, r->name, entry, true);
