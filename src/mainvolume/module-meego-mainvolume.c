@@ -740,7 +740,6 @@ static void release_slot(struct mv_userdata *u, uint32_t slot) {
 
 static pa_hook_result_t sink_input_put_cb(pa_core *c, pa_object *o, struct mv_userdata *u) {
     pa_sink_input *si;
-    pa_sink_input_state_t state;
     const char *role;
     uint32_t slot;
 
@@ -771,9 +770,7 @@ static pa_hook_result_t sink_input_put_cb(pa_core *c, pa_object *o, struct mv_us
         goto end;
     }
 
-    state = pa_sink_input_get_state(si);
-    if (state == PA_SINK_INPUT_DRAINED ||
-        state == PA_SINK_INPUT_RUNNING)
+    if (si->state == PA_SINK_INPUT_RUNNING)
         u->notifier.enabled_slots |= slot;
 
     check_notifier(u);
@@ -783,7 +780,6 @@ end:
 }
 static pa_hook_result_t sink_input_state_changed_cb(pa_core *c, pa_object *o, struct mv_userdata *u) {
     pa_sink_input *si;
-    pa_sink_input_state_t state;
     uintptr_t *slot_ptr;
     uint32_t slot;
 
@@ -799,9 +795,7 @@ static pa_hook_result_t sink_input_state_changed_cb(pa_core *c, pa_object *o, st
 
     slot = PA_PTR_TO_UINT32(slot_ptr);
 
-    state = pa_sink_input_get_state(si);
-    if (state == PA_SINK_INPUT_DRAINED ||
-        state == PA_SINK_INPUT_RUNNING)
+    if (si->state == PA_SINK_INPUT_RUNNING)
         u->notifier.enabled_slots |= slot;
     else
         u->notifier.enabled_slots &= ~slot;
