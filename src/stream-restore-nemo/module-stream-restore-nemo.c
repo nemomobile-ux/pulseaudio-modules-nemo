@@ -16,9 +16,7 @@
   General Public License for more details.
 
   You should have received a copy of the GNU Lesser General Public License
-  along with PulseAudio; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307
-  USA.
+  along with PulseAudio; if not, see <http://www.gnu.org/licenses/>.
 ***/
 
 #ifdef HAVE_CONFIG_H
@@ -71,8 +69,8 @@ PA_MODULE_USAGE(
         "restore_device=<Save/restore sinks/sources?> "
         "restore_volume=<Save/restore volumes?> "
         "restore_muted=<Save/restore muted states?> "
-        "on_hotplug=<When new device becomes available, recheck streams?> "
-        "on_rescue=<When device becomes unavailable, recheck streams?> "
+        "on_hotplug=<This argument is obsolete, please remove it from configuration> "
+        "on_rescue=<This argument is obsolete, please remove it from configuration> "
         "fallback_table=<filename> "
         "route_table=<filename> "
         "sink_volume_table=<filename> "
@@ -126,24 +124,12 @@ struct userdata {
     pa_core *core;
     pa_module *module;
     pa_subscription *subscription;
-    pa_hook_slot
-        *sink_input_new_hook_slot,
-        *sink_input_fixate_hook_slot,
-        *source_output_new_hook_slot,
-        *source_output_fixate_hook_slot,
-        *sink_put_hook_slot,
-        *source_put_hook_slot,
-        *sink_unlink_hook_slot,
-        *source_unlink_hook_slot,
-        *connection_unlink_hook_slot;
     pa_time_event *save_time_event;
     pa_database* database;
 
     bool restore_device:1;
     bool restore_volume:1;
     bool restore_muted:1;
-    bool on_hotplug:1;
-    bool on_rescue:1;
 
     pa_native_protocol *protocol;
     pa_idxset *subscribed;
@@ -173,16 +159,15 @@ struct userdata {
     PA_LLIST_HEAD(struct ext_sink_volume, sink_volumes);
 };
 
-#define ENTRY_VERSION 4
+#define ENTRY_VERSION 5
 
 struct entry {
-    uint8_t version;
     bool muted_valid, volume_valid, device_valid, card_valid;
     bool muted;
     pa_channel_map channel_map;
     pa_cvolume volume;
-    char *device;
-    char *card;
+    char* device;
+    char* card;
 };
 
 #define EXT_ROUTE_ENTRY_VERSION 4
@@ -456,15 +441,18 @@ static void dbus_entry_free(struct dbus_entry *de) {
 static int get_volume_arg(DBusConnection *conn, DBusMessage *msg, DBusMessageIter *iter, pa_channel_map *map, pa_cvolume *vol) {
     DBusMessageIter array_iter;
     DBusMessageIter struct_iter;
-    char *sig = NULL;
+    char *signature;
 
     pa_assert(conn);
     pa_assert(msg);
     pa_assert(iter);
     pa_assert(map);
     pa_assert(vol);
-    pa_assert(pa_safe_streq((sig = dbus_message_iter_get_signature(iter)), "a(uu)"));
-    dbus_free(sig);
+
+    pa_assert_se(signature = dbus_message_iter_get_signature(iter));
+    pa_assert(pa_streq(signature, "a(uu)"));
+
+    dbus_free(signature);
 
     pa_channel_map_init(map);
     pa_cvolume_init(vol);
@@ -1842,7 +1830,6 @@ static void save_time_callback(pa_mainloop_api*a, pa_time_event* e, const struct
 
 static struct entry* entry_new(void) {
     struct entry *r = pa_xnew0(struct entry, 1);
-    r->version = ENTRY_VERSION;
     return r;
 }
 
@@ -1864,7 +1851,7 @@ static bool entry_write(struct userdata *u, const char *name, const struct entry
     pa_assert(e);
 
     t = pa_tagstruct_new();
-    pa_tagstruct_putu8(t, e->version);
+    pa_tagstruct_putu8(t, ENTRY_VERSION);
     pa_tagstruct_put_boolean(t, e->volume_valid);
     pa_tagstruct_put_channel_map(t, &e->channel_map);
     pa_tagstruct_put_cvolume(t, &e->volume);
@@ -1982,6 +1969,7 @@ static struct entry *entry_read(struct userdata *u, const char *name) {
     pa_datum key, data;
     struct entry *e = NULL;
     pa_tagstruct *t = NULL;
+    uint8_t version;
     const char *device, *card;
 
     pa_assert(u);
@@ -1998,8 +1986,8 @@ static struct entry *entry_read(struct userdata *u, const char *name) {
     t = pa_tagstruct_new_fixed(data.data, data.size);
     e = entry_new();
 
-    if (pa_tagstruct_getu8(t, &e->version) < 0 ||
-        e->version > ENTRY_VERSION ||
+    if (pa_tagstruct_getu8(t, &version) < 0 ||
+        version > ENTRY_VERSION ||
         pa_tagstruct_get_boolean(t, &e->volume_valid) < 0 ||
         pa_tagstruct_get_channel_map(t, &e->channel_map) < 0 ||
         pa_tagstruct_get_cvolume(t, &e->volume) < 0 ||
@@ -2019,12 +2007,12 @@ static struct entry *entry_read(struct userdata *u, const char *name) {
     if (!pa_tagstruct_eof(t))
         goto fail;
 
-    if (e->device_valid && !pa_namereg_is_valid_name(e->device)) {
+    if (e->device_valid && (!e->device || !pa_namereg_is_valid_name(e->device))) {
         pa_log_warn("Invalid device name stored in database for stream %s", name);
         goto fail;
     }
 
-    if (e->card_valid && !pa_namereg_is_valid_name(e->card)) {
+    if (e->card_valid && (!e->card || !pa_namereg_is_valid_name(e->card))) {
         pa_log_warn("Invalid card name stored in database for stream %s", name);
         goto fail;
     }
@@ -2073,11 +2061,7 @@ static void trigger_save(struct userdata *u) {
     PA_IDXSET_FOREACH(c, u->subscribed, idx) {
         pa_tagstruct *t;
 
-#if (PULSEAUDIO_VERSION >= 7)
         t = pa_tagstruct_new();
-#else
-        t = pa_tagstruct_new(NULL, 0);
-#endif
         pa_tagstruct_putu32(t, PA_COMMAND_EXTENSION);
         pa_tagstruct_putu32(t, 0);
         pa_tagstruct_putu32(t, u->module->index);
@@ -2162,6 +2146,13 @@ static void subscribe_callback(pa_core *c, pa_subscription_event_type_t t, uint3
         if (!(sink_input = pa_idxset_get_by_index(c->sink_inputs, idx)))
             return;
 
+        /* Ignore this sink input if it is connecting a filter sink to
+         * the master */
+        if (sink_input->origin_sink) {
+            pa_log("sink-input with origin sink");
+            return;
+        }
+
         if (!(name = pa_proplist_get_stream_group(sink_input->proplist, "sink-input", IDENTIFICATION_PROPERTY)))
             return;
 
@@ -2191,25 +2182,35 @@ static void subscribe_callback(pa_core *c, pa_subscription_event_type_t t, uint3
             mute_updated = !created_new_entry && (!old->muted_valid || entry->muted != old->muted);
         }
 
-        if (sink_input->save_sink) {
-            pa_xfree(entry->device);
-            entry->device = pa_xstrdup(sink_input->sink->name);
-            entry->device_valid = true;
+        if (sink_input->preferred_sink != NULL || !created_new_entry) {
+            pa_sink *s = NULL;
 
-            device_updated = !created_new_entry && (!old->device_valid || !pa_streq(entry->device, old->device));
-            if (sink_input->sink->card) {
-                pa_xfree(entry->card);
-                entry->card = pa_xstrdup(sink_input->sink->card->name);
+            pa_xfree(entry->device);
+            entry->device = pa_xstrdup(sink_input->preferred_sink);
+            entry->device_valid = true;
+            if (!entry->device)
+                entry->device_valid = false;
+
+            device_updated = !created_new_entry && !pa_safe_streq(entry->device, old->device);
+            pa_xfree(entry->card);
+            entry->card = NULL;
+            entry->card_valid = false;
+            if (entry->device_valid && (s = pa_namereg_get(c, entry->device, PA_NAMEREG_SINK)) && s->card) {
+                entry->card = pa_xstrdup(s->card->name);
                 entry->card_valid = true;
             }
         }
-
     } else {
         pa_source_output *source_output;
 
         pa_assert((t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) == PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT);
 
         if (!(source_output = pa_idxset_get_by_index(c->source_outputs, idx)))
+            return;
+
+        /* Ignore this source output if it is connecting a filter source to
+         * the master */
+        if (source_output->destination_source)
             return;
 
         if (!(name = pa_proplist_get_stream_group(source_output->proplist, "source-output", IDENTIFICATION_PROPERTY)))
@@ -2241,16 +2242,22 @@ static void subscribe_callback(pa_core *c, pa_subscription_event_type_t t, uint3
             mute_updated = !created_new_entry && (!old->muted_valid || entry->muted != old->muted);
         }
 
-        if (source_output->save_source) {
+        if (source_output->preferred_source != NULL || !created_new_entry) {
+            pa_source *s = NULL;
+
             pa_xfree(entry->device);
-            entry->device = pa_xstrdup(source_output->source->name);
+            entry->device = pa_xstrdup(source_output->preferred_source);
             entry->device_valid = true;
 
-            device_updated = !created_new_entry && (!old->device_valid || !pa_streq(entry->device, old->device));
+            if (!entry->device)
+                entry->device_valid = false;
 
-            if (source_output->source->card) {
-                pa_xfree(entry->card);
-                entry->card = pa_xstrdup(source_output->source->card->name);
+            device_updated = !created_new_entry && !pa_safe_streq(entry->device, old->device);
+            pa_xfree(entry->card);
+            entry->card = NULL;
+            entry->card_valid = false;
+            if (entry->device_valid && (s = pa_namereg_get(c, entry->device, PA_NAMEREG_SOURCE)) && s->card) {
+                entry->card = pa_xstrdup(s->card->name);
                 entry->card_valid = true;
             }
         }
@@ -2278,16 +2285,16 @@ static void subscribe_callback(pa_core *c, pa_subscription_event_type_t t, uint3
     } else {
         if (entry_write(u, name, entry, true))
             trigger_save(u);
+        else
+            pa_log_error("Could not store volume/mute/device for stream %s.", name);
     }
 
 #ifdef HAVE_DBUS
-    if (created_new_entry) {
+    if (!(de = pa_hashmap_get(u->dbus_entries, name))) {
         de = dbus_entry_new(u, name);
         pa_assert_se(pa_hashmap_put(u->dbus_entries, de->entry_name, de) == 0);
         send_new_entry_signal(de);
     } else {
-        pa_assert_se(de = pa_hashmap_get(u->dbus_entries, name));
-
         if (device_updated)
             send_device_updated_signal(de, entry);
         if (volume_updated)
@@ -2295,6 +2302,11 @@ static void subscribe_callback(pa_core *c, pa_subscription_event_type_t t, uint3
         if (mute_updated)
             send_mute_updated_signal(de, entry);
     }
+#else
+    /* Silence compiler warnings */
+    (void) device_updated;
+    (void) volume_updated;
+    (void) mute_updated;
 #endif
 
     if (r && entry->volume_valid)
@@ -2318,11 +2330,15 @@ static pa_hook_result_t sink_input_new_hook_callback(pa_core *c, pa_sink_input_n
 
     if (new_data->sink)
         pa_log_debug("Not restoring device for stream %s, because already set to '%s'.", name, new_data->sink->name);
+    else if (new_data->origin_sink)
+        pa_log_debug("Not restoring device for stream %s, because it connects a filter to the master sink.", name);
     else if ((e = entry_read(u, name))) {
         pa_sink *s = NULL;
 
-        if (e->device_valid)
+        if (e->device_valid) {
             s = pa_namereg_get(c, e->device, PA_NAMEREG_SINK);
+            new_data->preferred_sink = pa_xstrdup(e->device);
+        }
 
         if (!s && e->card_valid) {
             pa_card *card;
@@ -2334,13 +2350,11 @@ static pa_hook_result_t sink_input_new_hook_callback(pa_core *c, pa_sink_input_n
         /* It might happen that a stream and a sink are set up at the
            same time, in which case we want to make sure we don't
            interfere with that */
-        if (s && PA_SINK_IS_LINKED(pa_sink_get_state(s)))
-#if PULSEAUDIO_VERSION >= 12
-            if (pa_sink_input_new_data_set_sink(new_data, s, true, false))
-#else
-            if (pa_sink_input_new_data_set_sink(new_data, s, true))
-#endif
-                pa_log_info("Restoring device for stream %s.", name);
+        if (s && PA_SINK_IS_LINKED(s->state))
+            if (!s->active_port || s->active_port->available != PA_AVAILABLE_NO) {
+                if (pa_sink_input_new_data_set_sink(new_data, s, true, false))
+                    pa_log_info("Restoring device for stream %s.", name);
+	    }
 
         entry_free(e);
     }
@@ -2361,6 +2375,11 @@ static pa_hook_result_t sink_input_fixate_hook_callback(pa_core *c, pa_sink_inpu
 
     if (!(name = pa_proplist_get_stream_group(new_data->proplist, "sink-input", IDENTIFICATION_PROPERTY)))
         return PA_HOOK_OK;
+
+    if (new_data->origin_sink) {
+        pa_log_debug("Not restoring volume for sink input %s, because it connects a filter to the master sink.", name);
+        return PA_HOOK_OK;
+    }
 
     if ((e = entry_read(u, name))) {
 
@@ -2423,11 +2442,15 @@ static pa_hook_result_t source_output_new_hook_callback(pa_core *c, pa_source_ou
 
     if (new_data->source)
         pa_log_debug("Not restoring device for stream %s, because already set", name);
+    else if (new_data->destination_source)
+        pa_log_debug("Not restoring device for stream %s, because it connects a filter to the master source.", name);
     else if ((e = entry_read(u, name))) {
         pa_source *s = NULL;
 
-        if (e->device_valid)
+        if (e->device_valid) {
             s = pa_namereg_get(c, e->device, PA_NAMEREG_SOURCE);
+            new_data->preferred_source = pa_xstrdup(e->device);
+        }
 
         if (!s && e->card_valid) {
             pa_card *card;
@@ -2439,13 +2462,11 @@ static pa_hook_result_t source_output_new_hook_callback(pa_core *c, pa_source_ou
         /* It might happen that a stream and a sink are set up at the
            same time, in which case we want to make sure we don't
            interfere with that */
-        if (s && PA_SOURCE_IS_LINKED(pa_source_get_state(s))) {
-            pa_log_info("Restoring device for stream %s.", name);
-#if PULSEAUDIO_VERSION >= 12
-            pa_source_output_new_data_set_source(new_data, s, true, false);
-#else
-            pa_source_output_new_data_set_source(new_data, s, true);
-#endif
+        if (s && PA_SOURCE_IS_LINKED(s->state)) {
+            if (!s->active_port || s->active_port->available != PA_AVAILABLE_NO) {
+                pa_log_info("Restoring device for stream %s.", name);
+                pa_source_output_new_data_set_source(new_data, s, true, false);
+	    }
         }
 
         entry_free(e);
@@ -2467,6 +2488,11 @@ static pa_hook_result_t source_output_fixate_hook_callback(pa_core *c, pa_source
 
     if (!(name = pa_proplist_get_stream_group(new_data->proplist, "source-output", IDENTIFICATION_PROPERTY)))
         return PA_HOOK_OK;
+
+    if (new_data->destination_source) {
+        pa_log_debug("Not restoring volume for source output %s, because it connects a filter to the master source.", name);
+        return PA_HOOK_OK;
+    }
 
     if ((e = entry_read(u, name))) {
 
@@ -2503,189 +2529,6 @@ static pa_hook_result_t source_output_fixate_hook_callback(pa_core *c, pa_source
     }
 
     pa_xfree(name);
-
-    return PA_HOOK_OK;
-}
-
-static pa_hook_result_t sink_put_hook_callback(pa_core *c, pa_sink *sink, struct userdata *u) {
-    pa_sink_input *si;
-    uint32_t idx;
-
-    pa_assert(c);
-    pa_assert(sink);
-    pa_assert(u);
-    pa_assert(u->on_hotplug && u->restore_device);
-
-    PA_IDXSET_FOREACH(si, c->sink_inputs, idx) {
-        char *name;
-        struct entry *e;
-
-        if (si->sink == sink)
-            continue;
-
-        if (si->save_sink)
-            continue;
-
-        /* Skip this if it is already in the process of being moved
-         * anyway */
-        if (!si->sink)
-            continue;
-
-        /* It might happen that a stream and a sink are set up at the
-           same time, in which case we want to make sure we don't
-           interfere with that */
-        if (!PA_SINK_INPUT_IS_LINKED(pa_sink_input_get_state(si)))
-            continue;
-
-        if (!(name = pa_proplist_get_stream_group(si->proplist, "sink-input", IDENTIFICATION_PROPERTY)))
-            continue;
-
-        if ((e = entry_read(u, name))) {
-            if (e->device_valid && pa_streq(e->device, sink->name))
-                pa_sink_input_move_to(si, sink, true);
-
-            entry_free(e);
-        }
-
-        pa_xfree(name);
-    }
-
-    return PA_HOOK_OK;
-}
-
-static pa_hook_result_t source_put_hook_callback(pa_core *c, pa_source *source, struct userdata *u) {
-    pa_source_output *so;
-    uint32_t idx;
-
-    pa_assert(c);
-    pa_assert(source);
-    pa_assert(u);
-    pa_assert(u->on_hotplug && u->restore_device);
-
-    PA_IDXSET_FOREACH(so, c->source_outputs, idx) {
-        char *name;
-        struct entry *e;
-
-        if (so->source == source)
-            continue;
-
-        if (so->save_source)
-            continue;
-
-        if (so->direct_on_input)
-            continue;
-
-        /* Skip this if it is already in the process of being moved anyway */
-        if (!so->source)
-            continue;
-
-        /* It might happen that a stream and a source are set up at the
-           same time, in which case we want to make sure we don't
-           interfere with that */
-        if (!PA_SOURCE_OUTPUT_IS_LINKED(pa_source_output_get_state(so)))
-            continue;
-
-        if (!(name = pa_proplist_get_stream_group(so->proplist, "source-output", IDENTIFICATION_PROPERTY)))
-            continue;
-
-        if ((e = entry_read(u, name))) {
-            if (e->device_valid && pa_streq(e->device, source->name))
-                pa_source_output_move_to(so, source, true);
-
-            entry_free(e);
-        }
-
-        pa_xfree(name);
-    }
-
-    return PA_HOOK_OK;
-}
-
-static pa_hook_result_t sink_unlink_hook_callback(pa_core *c, pa_sink *sink, struct userdata *u) {
-    pa_sink_input *si;
-    uint32_t idx;
-
-    pa_assert(c);
-    pa_assert(sink);
-    pa_assert(u);
-    pa_assert(u->on_rescue && u->restore_device);
-
-    /* There's no point in doing anything if the core is shut down anyway */
-    if (c->state == PA_CORE_SHUTDOWN)
-        return PA_HOOK_OK;
-
-    PA_IDXSET_FOREACH(si, sink->inputs, idx) {
-        char *name;
-        struct entry *e;
-
-        if (!si->sink)
-            continue;
-
-        if (!(name = pa_proplist_get_stream_group(si->proplist, "sink-input", IDENTIFICATION_PROPERTY)))
-            continue;
-
-        if ((e = entry_read(u, name))) {
-
-            if (e->device_valid) {
-                pa_sink *d;
-
-                if ((d = pa_namereg_get(c, e->device, PA_NAMEREG_SINK)) &&
-                    d != sink &&
-                    PA_SINK_IS_LINKED(pa_sink_get_state(d)))
-                    pa_sink_input_move_to(si, d, true);
-            }
-
-            entry_free(e);
-        }
-
-        pa_xfree(name);
-    }
-
-    return PA_HOOK_OK;
-}
-
-static pa_hook_result_t source_unlink_hook_callback(pa_core *c, pa_source *source, struct userdata *u) {
-    pa_source_output *so;
-    uint32_t idx;
-
-    pa_assert(c);
-    pa_assert(source);
-    pa_assert(u);
-    pa_assert(u->on_rescue && u->restore_device);
-
-    /* There's no point in doing anything if the core is shut down anyway */
-    if (c->state == PA_CORE_SHUTDOWN)
-        return PA_HOOK_OK;
-
-    PA_IDXSET_FOREACH(so, source->outputs, idx) {
-        char *name;
-        struct entry *e;
-
-        if (so->direct_on_input)
-            continue;
-
-        if (!so->source)
-            continue;
-
-        if (!(name = pa_proplist_get_stream_group(so->proplist, "source-output", IDENTIFICATION_PROPERTY)))
-            continue;
-
-        if ((e = entry_read(u, name))) {
-
-            if (e->device_valid) {
-                pa_source *d;
-
-                if ((d = pa_namereg_get(c, e->device, PA_NAMEREG_SOURCE)) &&
-                    d != source &&
-                    PA_SOURCE_IS_LINKED(pa_source_get_state(d)))
-                    pa_source_output_move_to(so, d, true);
-            }
-
-            entry_free(e);
-        }
-
-        pa_xfree(name);
-    }
 
     return PA_HOOK_OK;
 }
@@ -2739,8 +2582,8 @@ static int fill_db(struct userdata *u, const char *filename) {
         if (pa_atod(v, &db) >= 0) {
             if (db <= 0.0) {
                 struct entry e;
+
                 pa_zero(e);
-                e.version = ENTRY_VERSION;
                 e.volume_valid = true;
                 pa_cvolume_set(&e.volume, 1, pa_sw_volume_from_dB(db));
                 pa_channel_map_init_mono(&e.channel_map);
@@ -2804,21 +2647,16 @@ static void entry_apply(struct userdata *u, const char *name, struct entry *e) {
 
         if (u->restore_device) {
             if (!e->device_valid) {
-                if (si->save_sink) {
+                if (si->preferred_sink != NULL) {
                     pa_log_info("Ensuring device is not saved for stream %s.", name);
                     /* If the device is not valid we should make sure the
-                       save flag is cleared as the user may have specifically
+                       preferred_sink is cleared as the user may have specifically
                        removed the sink element from the rule. */
-                    si->save_sink = false;
-                    /* This is cheating a bit. The sink input itself has not changed
-                       but the rules governing its routing have, so we fire this event
-                       such that other routing modules (e.g. module-device-manager)
-                       will pick up the change and reapply their routing */
-                    pa_subscription_post(si->core, PA_SUBSCRIPTION_EVENT_SINK_INPUT|PA_SUBSCRIPTION_EVENT_CHANGE, si->index);
+                    pa_sink_input_set_preferred_sink(si, NULL);
                 }
             } else if ((s = pa_namereg_get(u->core, e->device, PA_NAMEREG_SINK))) {
                 pa_log_info("Restoring device for stream %s.", name);
-                pa_sink_input_move_to(si, s, true);
+                pa_sink_input_set_preferred_sink(si, s);
             }
         }
     }
@@ -2852,21 +2690,16 @@ static void entry_apply(struct userdata *u, const char *name, struct entry *e) {
 
         if (u->restore_device) {
             if (!e->device_valid) {
-                if (so->save_source) {
+                if (so->preferred_source != NULL) {
                     pa_log_info("Ensuring device is not saved for stream %s.", name);
                     /* If the device is not valid we should make sure the
-                       save flag is cleared as the user may have specifically
+                       preferred_source is cleared as the user may have specifically
                        removed the source element from the rule. */
-                    so->save_source = false;
-                    /* This is cheating a bit. The source output itself has not changed
-                       but the rules governing its routing have, so we fire this event
-                       such that other routing modules (e.g. module-device-manager)
-                       will pick up the change and reapply their routing */
-                    pa_subscription_post(so->core, PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT|PA_SUBSCRIPTION_EVENT_CHANGE, so->index);
+                    pa_source_output_set_preferred_source(so, NULL);
                 }
             } else if ((s = pa_namereg_get(u->core, e->device, PA_NAMEREG_SOURCE))) {
                 pa_log_info("Restoring device for stream %s.", name);
-                pa_source_output_move_to(so, s, true);
+                pa_source_output_set_preferred_source(so, s);
             }
         }
     }
@@ -2925,11 +2758,7 @@ static int extension_cb(pa_native_protocol *p, pa_module *m, pa_native_connectio
     if (pa_tagstruct_getu32(t, &command) < 0)
         goto fail;
 
-#if (PULSEAUDIO_VERSION >= 7)
     reply = pa_tagstruct_new();
-#else
-    reply = pa_tagstruct_new(NULL, 0);
-#endif
     pa_tagstruct_putu32(reply, PA_COMMAND_REPLY);
     pa_tagstruct_putu32(reply, tag);
 
@@ -3271,7 +3100,7 @@ static void clean_up_db(struct userdata *u) {
     PA_LLIST_FOREACH_SAFE(item, next, to_be_converted) {
         pa_log_debug("Upgrading a legacy entry to the current format: %s", item->entry_name);
 
-        pa_assert_se(entry_write(u, item->entry_name, item->entry, true) >= 0);
+        pa_assert_se(entry_write(u, item->entry_name, item->entry, true));
         trigger_save(u);
 
         PA_LLIST_REMOVE(struct clean_up_item, to_be_converted, item);
@@ -3285,12 +3114,13 @@ static void clean_up_db(struct userdata *u) {
 int pa__init(pa_module*m) {
     pa_modargs *ma = NULL;
     struct userdata *u;
-    char *fname;
+    char *state_path;
     pa_sink_input *si;
     pa_source_output *so;
     uint32_t idx;
-    bool restore_device = true, restore_volume = true, restore_muted = true, on_hotplug = true, on_rescue = true;
+    bool restore_device = true, restore_volume = true, restore_muted = true;
     bool restore_route_volume = true, use_voice = false;
+
 #ifdef HAVE_DBUS
     pa_datum key;
     bool done;
@@ -3305,12 +3135,14 @@ int pa__init(pa_module*m) {
 
     if (pa_modargs_get_value_boolean(ma, "restore_device", &restore_device) < 0 ||
         pa_modargs_get_value_boolean(ma, "restore_volume", &restore_volume) < 0 ||
-        pa_modargs_get_value_boolean(ma, "restore_muted", &restore_muted) < 0 ||
-        pa_modargs_get_value_boolean(ma, "on_hotplug", &on_hotplug) < 0 ||
-        pa_modargs_get_value_boolean(ma, "on_rescue", &on_rescue) < 0) {
-        pa_log("restore_device=, restore_volume=, restore_muted=, on_hotplug= and on_rescue= expect boolean arguments");
+        pa_modargs_get_value_boolean(ma, "restore_muted", &restore_muted) < 0) {
+        pa_log("restore_device=, restore_volume= and restore_muted= expect boolean arguments");
         goto fail;
     }
+
+    if (pa_modargs_get_value(ma, "on_hotplug", NULL) != NULL ||
+        pa_modargs_get_value(ma, "on_rescue", NULL) != NULL)
+        pa_log_debug("on_hotplug and on_rescue are obsolete arguments, please remove them from your configuration");
 
     if (pa_modargs_get_value_boolean(ma, "restore_route_volume", &restore_route_volume) < 0) {
         pa_log("restore_route_volume= expects boolean argument.");
@@ -3331,8 +3163,6 @@ int pa__init(pa_module*m) {
     u->restore_device = restore_device;
     u->restore_volume = restore_volume;
     u->restore_muted = restore_muted;
-    u->on_hotplug = on_hotplug;
-    u->on_rescue = on_rescue;
     u->restore_route_volume = restore_route_volume;
     u->use_voice = use_voice;
 
@@ -3344,31 +3174,19 @@ int pa__init(pa_module*m) {
     u->protocol = pa_native_protocol_get(m->core);
     pa_native_protocol_install_ext(u->protocol, m, extension_cb);
 
-    u->connection_unlink_hook_slot = pa_hook_connect(&pa_native_protocol_hooks(u->protocol)[PA_NATIVE_HOOK_CONNECTION_UNLINK], PA_HOOK_NORMAL, (pa_hook_cb_t) connection_unlink_hook_cb, u);
+    pa_module_hook_connect(m, &pa_native_protocol_hooks(u->protocol)[PA_NATIVE_HOOK_CONNECTION_UNLINK], PA_HOOK_NORMAL, (pa_hook_cb_t) connection_unlink_hook_cb, u);
 
     u->subscription = pa_subscription_new(m->core, PA_SUBSCRIPTION_MASK_SINK_INPUT|PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT, subscribe_callback, u);
 
     if (restore_device) {
         /* A little bit earlier than module-intended-roles ... */
-        u->sink_input_new_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_NEW], PA_HOOK_EARLY, (pa_hook_cb_t) sink_input_new_hook_callback, u);
-        u->source_output_new_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_NEW], PA_HOOK_EARLY, (pa_hook_cb_t) source_output_new_hook_callback, u);
-    }
-
-    if (restore_device && on_hotplug) {
-        /* A little bit earlier than module-intended-roles ... */
-        u->sink_put_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_PUT], PA_HOOK_LATE, (pa_hook_cb_t) sink_put_hook_callback, u);
-        u->source_put_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_PUT], PA_HOOK_LATE, (pa_hook_cb_t) source_put_hook_callback, u);
-    }
-
-    if (restore_device && on_rescue) {
-        /* A little bit earlier than module-intended-roles, module-rescue-streams, ... */
-        u->sink_unlink_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_UNLINK], PA_HOOK_LATE, (pa_hook_cb_t) sink_unlink_hook_callback, u);
-        u->source_unlink_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_UNLINK], PA_HOOK_LATE, (pa_hook_cb_t) source_unlink_hook_callback, u);
+        pa_module_hook_connect(m, &m->core->hooks[PA_CORE_HOOK_SINK_INPUT_NEW], PA_HOOK_EARLY, (pa_hook_cb_t) sink_input_new_hook_callback, u);
+        pa_module_hook_connect(m, &m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_NEW], PA_HOOK_EARLY, (pa_hook_cb_t) source_output_new_hook_callback, u);
     }
 
     if (restore_volume || restore_muted) {
-        u->sink_input_fixate_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_FIXATE], PA_HOOK_EARLY, (pa_hook_cb_t) sink_input_fixate_hook_callback, u);
-        u->source_output_fixate_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_FIXATE], PA_HOOK_EARLY, (pa_hook_cb_t) source_output_fixate_hook_callback, u);
+        pa_module_hook_connect(m, &m->core->hooks[PA_CORE_HOOK_SINK_INPUT_FIXATE], PA_HOOK_EARLY, (pa_hook_cb_t) sink_input_fixate_hook_callback, u);
+        pa_module_hook_connect(m, &m->core->hooks[PA_CORE_HOOK_SOURCE_OUTPUT_FIXATE], PA_HOOK_EARLY, (pa_hook_cb_t) source_output_fixate_hook_callback, u);
     }
 
     if (u->restore_route_volume && u->use_voice) {
@@ -3376,17 +3194,15 @@ int pa__init(pa_module*m) {
         u->sink_input_move_finished_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_MOVE_FINISH], PA_HOOK_NORMAL, (pa_hook_cb_t)ext_hw_sink_input_move_finish_callback, u);
     }
 
-    if (!(fname = pa_state_path("stream-volumes", true)))
+    if (!(state_path = pa_state_path(NULL, true)))
         goto fail;
 
-    if (!(u->database = pa_database_open(fname, true))) {
-        pa_log("Failed to open volume database '%s': %s", fname, pa_cstrerror(errno));
-        pa_xfree(fname);
+    if (!(u->database = pa_database_open(state_path, "stream-volumes", true, true))) {
+        pa_xfree(state_path);
         goto fail;
     }
 
-    pa_log_info("Successfully opened database file '%s'.", fname);
-    pa_xfree(fname);
+    pa_xfree(state_path);
 
     clean_up_db(u);
 
@@ -3426,17 +3242,17 @@ int pa__init(pa_module*m) {
     }
 #endif
 
-    if (!(fname = pa_state_path("x-maemo-route-volumes", true)))
+    if (!(state_path = pa_state_path(NULL, true)))
         goto fail;
 
-    if (!(u->route_database = pa_database_open(fname, true))) {
-        pa_log("Failed to open volume database '%s': %s", fname, pa_cstrerror(errno));
-        pa_xfree(fname);
+    if (!(u->route_database = pa_database_open(state_path, "x-maemo-route-volumes", true, true))) {
+        pa_log("Failed to open volume database '%s': %s", state_path, pa_cstrerror(errno));
+        pa_xfree(state_path);
         goto fail;
     }
 
-    pa_log_info("Sucessfully opened database file '%s'.", fname);
-    pa_xfree(fname);
+    pa_log_info("Sucessfully opened database file '%s'.", state_path);
+    pa_xfree(state_path);
 
     PA_IDXSET_FOREACH(si, m->core->sink_inputs, idx)
         subscribe_callback(m->core, PA_SUBSCRIPTION_EVENT_SINK_INPUT|PA_SUBSCRIPTION_EVENT_NEW, si->index, u);
@@ -3494,32 +3310,9 @@ void pa__done(pa_module*m) {
     if (!u->use_voice)
         meego_parameter_stop_updates(NULL, (pa_hook_cb_t) ext_parameters_changed_cb, u);
 
-    if (u->sink_input_new_hook_slot)
-        pa_hook_slot_free(u->sink_input_new_hook_slot);
-    if (u->sink_input_fixate_hook_slot)
-        pa_hook_slot_free(u->sink_input_fixate_hook_slot);
-    if (u->source_output_new_hook_slot)
-        pa_hook_slot_free(u->source_output_new_hook_slot);
-    if (u->sink_proplist_changed_slot)
-        pa_hook_slot_free(u->sink_proplist_changed_slot);
-    if (u->sink_input_move_finished_slot)
-        pa_hook_slot_free(u->sink_input_move_finished_slot);
-
-    if (u->sink_put_hook_slot)
-        pa_hook_slot_free(u->sink_put_hook_slot);
-    if (u->source_put_hook_slot)
-        pa_hook_slot_free(u->source_put_hook_slot);
-
-    if (u->sink_unlink_hook_slot)
-        pa_hook_slot_free(u->sink_unlink_hook_slot);
-    if (u->source_unlink_hook_slot)
-        pa_hook_slot_free(u->source_unlink_hook_slot);
-
-    if (u->connection_unlink_hook_slot)
-        pa_hook_slot_free(u->connection_unlink_hook_slot);
-
     if (u->volume_proxy_hook_slot)
         pa_hook_slot_free(u->volume_proxy_hook_slot);
+
     if (u->volume_proxy)
         pa_volume_proxy_unref(u->volume_proxy);
 
