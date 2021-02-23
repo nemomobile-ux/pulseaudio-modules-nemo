@@ -27,7 +27,6 @@
 #include <pulsecore/core-util.h>
 
 #include "module-meego-parameters-userdata.h"
-#include "module-meego-parameters-symdef.h"
 
 #include <parameters.h>
 #include <meego/call-state-tracker.h>

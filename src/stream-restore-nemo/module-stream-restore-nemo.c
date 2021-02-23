@@ -57,7 +57,6 @@
 #include <pulsecore/protocol-dbus.h>
 #endif
 
-#include "module-stream-restore-nemo-symdef.h"
 #include "volume-proxy.h"
 #include "parameter-hook.h"
 

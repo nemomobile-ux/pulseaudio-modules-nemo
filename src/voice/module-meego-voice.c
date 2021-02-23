@@ -20,7 +20,6 @@
  * USA.
  */
 #include "module-voice-userdata.h"
-#include "module-meego-voice-symdef.h"
 
 #include <pulsecore/modargs.h>
 #include <pulsecore/namereg.h>

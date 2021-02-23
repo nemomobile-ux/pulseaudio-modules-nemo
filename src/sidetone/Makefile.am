@@ -6,8 +6,6 @@ AM_LIBADD = $(PULSEAUDIO_LIBS) $(ASOUNDLIB_LIBS)
 
 modlibexec_LTLIBRARIES = module-meego-sidetone.la
 
-noinst_HEADERS = module-meego-sidetone-symdef.h
-
 module_meego_sidetone_la_SOURCES = \
 	module-meego-sidetone.c \
 	sidetone.c sidetone.h \
@@ -18,4 +16,4 @@ module_meego_sidetone_la_SOURCES = \
 
 module_meego_sidetone_la_LDFLAGS = -module -avoid-version -Wl,-no-undefined
 module_meego_sidetone_la_LIBADD = $(top_builddir)/src/common/libmeego-common.la $(AM_LIBADD)
-module_meego_sidetone_la_CFLAGS = $(AM_CFLAGS)
+module_meego_sidetone_la_CFLAGS = $(AM_CFLAGS) -DPA_MODULE_NAME=module_meego_sidetone

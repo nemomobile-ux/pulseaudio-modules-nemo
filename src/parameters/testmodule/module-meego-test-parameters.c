@@ -27,8 +27,6 @@
 #include <pulsecore/core-util.h>
 #include <pulsecore/namereg.h>
 
-#include "module-meego-test-parameters-symdef.h"
-
 #include "common/proplist-meego.h"
 #include "common/parameter-hook.h"
 #include "common/parameter-modifier.h"

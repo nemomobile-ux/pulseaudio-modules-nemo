@@ -38,7 +38,6 @@
 #include <pulse/timeval.h>
 #include <pulse/rtclock.h>
 
-#include "module-meego-mainvolume-symdef.h"
 #include "mainvolume.h"
 #include "listening-watchdog.h"
 

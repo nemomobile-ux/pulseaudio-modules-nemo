@@ -10,7 +10,6 @@ AM_LIBADD =							\
 ###################################
 #             Voice               #
 ###################################
-noinst_HEADERS = module-meego-voice-symdef.h
 
 modlibexec_LTLIBRARIES = module-meego-voice.la
 
@@ -32,4 +31,4 @@ else
 module_meego_voice_la_LDFLAGS = -module -avoid-version -lm -Wl,-no-undefined -Wl,-z,noexecstack
 endif
 module_meego_voice_la_LIBADD = $(AM_LIBADD)
-module_meego_voice_la_CFLAGS = $(AM_CFLAGS)
+module_meego_voice_la_CFLAGS = $(AM_CFLAGS) -DPA_MODULE_NAME=module_meego_voice
