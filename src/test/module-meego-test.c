@@ -44,8 +44,6 @@
 #include "shared-data.h"
 #include "proplist-nemo.h"
 
-#include "module-meego-test-symdef.h"
-
 PA_MODULE_AUTHOR("Pekka Ervasti");
 PA_MODULE_DESCRIPTION("test module");
 PA_MODULE_USAGE(

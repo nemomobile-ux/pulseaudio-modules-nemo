@@ -109,7 +109,7 @@ mv_listening_watchdog* mv_listening_watchdog_new(pa_core *core,
         pa_log("Failed to open watchdog database: couldn't get state path");
         goto end;
     }
-    if (!(db = pa_database_open(fname, true))) {
+    if (!(db = pa_database_open_internal(fname, true))) {
         pa_log("Failed to open watchdog database: %s", pa_cstrerror(errno));
         goto end;
     }

@@ -827,9 +827,9 @@ static void voice_hw_source_output_reinit_defer_cb(pa_mainloop_api *m, pa_defer_
     pa_xfree(d);
     d = NULL;
 
-    start_uncorked = PA_SOURCE_IS_OPENED(pa_source_get_state(u->raw_source)) ||
-        PA_SOURCE_IS_OPENED(pa_source_get_state(u->voip_source)) ||
-        pa_source_output_get_state(old_so) != PA_SOURCE_OUTPUT_CORKED;
+    start_uncorked = PA_SOURCE_IS_OPENED(u->raw_source->state) ||
+        PA_SOURCE_IS_OPENED(u->voip_source->state) ||
+        old_so->state != PA_SOURCE_OUTPUT_CORKED;
     pa_log("HWSO START UNCORKED: %d", start_uncorked);
 
     new_so = voice_hw_source_output_new(u, start_uncorked ? 0 : PA_SOURCE_OUTPUT_START_CORKED);
