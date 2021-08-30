@@ -75,6 +75,7 @@ PA_MODULE_USAGE(
         "sink_volume_table=<filename> "
         "use_voice=<true/false use voice module for mode detection");
 
+#define PA_DEFAULT_CONFIG_DIR "/etc/pulse"
 #define SAVE_INTERVAL (10 * PA_USEC_PER_SEC)
 #define IDENTIFICATION_PROPERTY "module-stream-restore.id"
 

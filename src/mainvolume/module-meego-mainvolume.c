@@ -27,6 +27,7 @@
 #include <pulsecore/core.h>
 #include <pulsecore/core-error.h>
 #include <pulsecore/module.h>
+#include <pulsecore/macro.h>
 #include <pulsecore/modargs.h>
 #include <pulsecore/core-util.h>
 #include <pulsecore/protocol-dbus.h>
@@ -76,6 +77,7 @@ static void dbus_signal_media_state(struct mv_userdata *u);
 
 static void check_notifier(struct mv_userdata *u);
 
+#define PA_DEFAULT_CONFIG_DIR "/etc/pulse"
 #define DEFAULT_LISTENING_NOTIFIER_CONF_FILE PA_DEFAULT_CONFIG_DIR PA_PATH_SEP "mainvolume-listening-time-notifier.conf"
 
 #define PROP_CALL_STEPS "x-nemo.mainvolume.call"
