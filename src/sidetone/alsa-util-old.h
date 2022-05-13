@@ -24,7 +24,7 @@
   USA.
 ***/
 
-#include <asoundlib.h>
+#include <alsa/asoundlib.h>
 
 /* Currently the upstream offers only pa_alsa_open_mixer_for_pcm() for opening
  * an alsa mixer handle, which isn't usable in the "alsa-old" modules, because

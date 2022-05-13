@@ -23,7 +23,7 @@
 #ifndef foosidetonealsautilshfoo
 #define foosidetonealsautilshfoo
 
-#include <asoundlib.h>
+#include <alsa/asoundlib.h>
 #include <pulsecore/macro.h>
 
 snd_mixer_elem_t *mixer_get_element(snd_mixer_t *mixer, const char* element_name);
